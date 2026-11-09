@@ -1,0 +1,9 @@
+# Windows desktop and browser automation
+pyautogui==0.9.54
+pywinauto==0.6.9
+pywin32==312
+pyperclip==1.11.0
+playwright==1.64.1
+pillow==13.0.0
+pygetwindow==0.0.9
+

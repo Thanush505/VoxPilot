@@ -1,0 +1,8 @@
+# AI agent framework, local LLM and tool integration
+langgraph==1.2.20
+langchain==1.4.9
+langchain-ollama==1.1.0
+ollama==0.6.3
+mcp==2.3.0
+langgraph-checkpoint-sqlite==3.1.3
+

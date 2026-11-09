@@ -1,0 +1,9 @@
+# Speech recognition, voice generation and microphone handling
+faster-whisper==1.2.1
+piper-tts==1.8.0
+openwakeword==0.6.0
+sounddevice==0.5.6
+soundfile==0.14.0
+numpy==2.5.4
+scipy==1.18.1
+
