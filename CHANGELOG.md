@@ -6,9 +6,163 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [Unreleased] - 2026-11-10
+## [Unreleased] - 2026-11-11
 
 ### Added
+- Phase 5 Step 1: Global Emergency Stop and Safe Automation Cancellation:
+  - Central Emergency Stop Manager ([`backend/automation/emergency_stop.py`](./backend/automation/emergency_stop.py)):
+    - `EmergencyStopManager`: Thread-safe coordinator singleton providing latching state machine, trigger source (`hotkey`, `api`, `manual`), reason, and timestamp tracking.
+    - Fail-Closed Active Operation Registry: Registers in-flight operations with `operation_id`, `execution_id`, `category`, `description`, `start_time`, `cancellation_requested`, `status`. Rejects new registrations with `EmergencyStopActiveError` when latched.
+    - Safe Explicit Reset: `reset_emergency_stop()` validates that all active operations have reached a confirmed safe terminal state. Rejects reset with `UnsafeResetError` if operations are still running (unless `force=True`). Interrupted executions are never auto-resumed.
+    - Cleanup Callback Dispatch: Allows subsystems to register teardown callbacks that run synchronously upon emergency stop trigger.
+  - Windows Global Hotkey Listener (`Ctrl + Alt + Escape`):
+    - `GlobalHotkeyListener`: Independent daemon thread running a native Win32 `RegisterHotKey` message loop (`GetMessageW` / `DispatchMessageW`).
+    - Established message queue via `PeekMessageW(..., PM_NOREMOVE)` before registration.
+    - Clean shutdown via `PostThreadMessageW(thread_id, WM_QUIT, 0, 0)` breaking the message loop without thread aborts.
+    - Unregisters hotkey cleanly upon exit via `UnregisterHotKey`.
+    - Integrated into FastAPI application lifespan in [`backend/main.py`](./backend/main.py).
+  - Direct Win32 Hardware Input Cleanup:
+    - `release_system_inputs()`: Dispatches immediate key-up events for Ctrl, Alt, Shift, LWin, RWin and button-up events for left, right, middle mouse buttons.
+  - Automation Controller Cancellation Checkpoints:
+    - [`backend/automation/keyboard_controller.py`](./backend/automation/keyboard_controller.py): Pre-execution checks and inter-chunk verification (every 50 chars). Aborts typing, calls `release_all_modifiers()`, and raises `EmergencyStopActiveError`. Added `release_all_modifiers()` method.
+    - [`backend/automation/mouse_controller.py`](./backend/automation/mouse_controller.py): Pre-execution checks in `move_to`, `click`, and `scroll`. Added `release_all_buttons()` method.
+    - [`backend/automation/browser_controller.py`](./backend/automation/browser_controller.py): Emergency cleanup callback cleanly terminates active Playwright sessions. Pre-execution checks in `start_session`, `navigate`, `click_element`, `enter_text`, `select_dropdown`, `scroll_page`, `navigate_history`, `capture_screenshot`, and `download_file`.
+    - [`backend/agent/tool_executor.py`](./backend/agent/tool_executor.py): Active operation registration around `tool_def.func(...)`. Catches `EmergencyStopActiveError` and returns structured `ExecutionResult(status="cancelled")`.
+  - LangGraph Workflow Cancellation:
+    - Pre-execution rejection in `agent.process_request` and `agent.resume_execution`.
+    - Latch checks in `recognize_intent`, `create_plan`, `validate_plan`, `execute_tool`, `evaluate_result`, and `replan_plan`.
+    - Truthfully records completed steps before halt in `completed_steps`.
+    - Prevents dynamic re-planning from running during emergency stop.
+    - Response generation truthfully reports user-requested cancellation.
+  - FastAPI REST Endpoints in [`backend/api/agent.py`](./backend/api/agent.py):
+    - `POST /agent/emergency-stop`: Immediate trigger returning latch status.
+    - `GET /agent/emergency-stop/status`: Status query returning latch status and active operations.
+    - `POST /agent/emergency-stop/reset`: Explicit reset validating safe terminal state, returning HTTP 409 Conflict if active operations are running (unless `force=True`).
+    - CSRF Origin protection enforced via `_verify_trusted_request`.
+    - Emergency stop reset is strictly omitted from `ToolRegistry`.
+  - Voice Pipeline Safeguards ([`backend/voice/voice_pipeline.py`](./backend/voice/voice_pipeline.py)):
+    - Checks emergency stop state before processing commands. Informs user of active stop and refuses all commands until reset.
+  - Comprehensive Test Suites:
+    - [`tests/test_emergency_stop.py`](./tests/test_emergency_stop.py) (15 tests)
+    - [`tests/test_emergency_stop_api.py`](./tests/test_emergency_stop_api.py) (7 tests)
+    - [`tests/test_agent_cancellation.py`](./tests/test_agent_cancellation.py) (5 tests)
+    - [`tests/test_emergency_stop_integration.py`](./tests/test_emergency_stop_integration.py) (12 tests)
+  - Updated test totals to 519 unit/integration tests + 3 live hardware tests = 522 total passing (0 failed).
+
+## [0.4.0] - 2026-11-10
+
+### Added
+- Phase 4 Step 3: Final Integration Audit, Confirmation Security, and End-to-End Verification:
+  - Tool Registry Alignment:
+    - Authoritative audit of `backend/agent/tool_registry.py` confirming 37 canonical tools, 11 aliases, and 2 pseudo-actions (`respond`, `ask_clarification`).
+    - Normalized references to nonexistent file tools (`read_file`, `open_file`, `write_file`) to canonical `get_file_metadata`.
+    - Confirmed 100% 1:1 mapping between `AgentPlanner.allowed_actions` (39 items) and canonical registry tools (0 unmapped actions).
+  - Confirmation & Human Approval Trust Boundary Hardening:
+    - Excluded approval and rejection operations from `ToolRegistry` (LLM cannot call or self-approve actions).
+    - Blocked bypasses using LLM-supplied `confirmed=True` or `is_consequential=False` flags in parameters.
+    - Bound approvals to execution ID, action type, and parameter hash via SHA-256 (`compute_action_hash`).
+    - Enforced single-use token consumption (`validate_and_consume`), replay rejection (`ReplayedConfirmationError`), and expiration check (`ConfirmationExpiredError`).
+    - Enforced localhost server binding (`127.0.0.1`) in `backend/main.py`.
+    - Implemented CSRF browser defense via `_verify_trusted_request` in `backend/api/agent.py`, rejecting untrusted `Origin` headers on approval endpoints with HTTP 403 Forbidden.
+    - Documented development trust boundary: Localhost HTTP approval represents a local desktop boundary; full cryptographic user authentication will be layered in Phase 6 with frontend integration.
+  - Database Consistency, Pragmas, and Event Loop Non-Blocking:
+    - Attached SQLAlchemy connection event listeners on `Engine` enforcing `PRAGMA foreign_keys = ON;` and `PRAGMA journal_mode = WAL;` across all connections.
+    - Enforced relational integrity (orphan execution or step insertions raise `IntegrityError`).
+    - Prevented asyncio event loop blocking by executing synchronous agent calls (`agent.process_request`, `agent.resume_execution`) off the main thread via `await anyio.to_thread.run_sync(...)`.
+    - Verified dual sync/async engine parity on `data/voxpilot.db` and transaction rollback integrity.
+  - Conversational Memory Stale Target Revalidation:
+    - Added `is_window_alive` and `is_file_accessible` validators to `ConversationContextManager`.
+    - Supported target revalidation evicting dead window HWNDs and deleted file paths, asking for clarification instead of operating on invalid handles.
+    - Verified conversation isolation: Conversation B does not inherit Conversation A's window context and asks for clarification.
+  - End-to-End Test Suites:
+    - [`tests/test_confirmation_security.py`](./tests/test_confirmation_security.py) (14 tests): Verifies trust boundaries, anti-tampering, CSRF origin verification, replay rejection, token scrubbing, and localhost binding.
+    - [`tests/test_database_concurrency.py`](./tests/test_database_concurrency.py) (8 tests): Verifies SQLite PRAGMAs, foreign key integrity, concurrent async tasks, rollback, and dual-engine parity.
+    - [`tests/test_agent_integration.py`](./tests/test_agent_integration.py) (13 tests): Verifies the 13 specified end-to-end workflows across REST, LangGraph, tool execution, and voice pipeline.
+  - Updated test totals to 480 unit/integration tests + 3 live hardware tests = 483 total passing (0 failed).
+- Phase 4 Step 2: Persistent Memory, Contextual Reasoning, and Dynamic Re-Planning:
+  - Created [`backend/database/models.py`](./backend/database/models.py):
+    - Defined SQLModel entities `ConversationRecord`, `ExecutionRecord`, and `ExecutionStepRecord` with relationships, foreign keys, cascade rules, and query indexes.
+    - Implemented `sanitize_dict_for_storage` and `serialize_sanitized_json` stripping passwords, tokens, API keys, and sensitive auth metadata.
+  - Created [`backend/database/connection.py`](./backend/database/connection.py):
+    - Configured async engine with `aiosqlite` and sync engine with standard `sqlite`.
+    - Added project root path anchoring for `data/voxpilot.db` (CWD-independent) with environment overrides.
+    - Added `init_db()`, `init_db_sync()`, `close_db()`, and test reset helpers.
+  - Created [`backend/database/repository.py`](./backend/database/repository.py):
+    - Implemented `DatabaseRepository` with both async and sync CRUD operations: `create_or_get_conversation`, `save_execution`, `save_execution_sync`, `record_execution_step`, `get_execution`, `list_conversations`, `list_executions_for_conversation`.
+    - Automatic schema table creation on initialization.
+  - Created [`backend/memory/context_manager.py`](./backend/memory/context_manager.py):
+    - Implemented `ConversationContextManager` with sliding window bounds (`max_turns=5`).
+    - Entity tracking for `active_window` (HWND, title, app name), `recent_files` (up to 10), `recent_urls` (up to 5), and `recent_application`.
+    - Reference resolution (`resolve_references`) handling pronouns ("it", "the window", "that app") and ordinal file references ("first file", "second file").
+    - Explicit ambiguity detection requesting clarification without guessing when multiple candidates exist.
+    - Target revalidation against live OS state before executing follow-up actions.
+    - Isolated memory namespaces by unique `conversation_id`.
+  - Extended [`backend/agent/planner.py`](./backend/agent/planner.py) and [`backend/agent/graph.py`](./backend/agent/graph.py):
+    - Extended `create_plan` with contextual memory injection.
+    - Implemented `replan_from_results` for dynamic runtime plan adaptation:
+      - Single file discovery binds path to subsequent operations.
+      - Multiple file matches request clarification via `ask_clarification`.
+      - Zero file matches replace actions with safe user notification.
+      - Application launch binds runtime window HWND to subsequent typing/window management steps.
+      - Intermediate failures safely abort dependent consequential actions.
+    - Added `replan_plan` node and `_should_replan` conditional edge in LangGraph workflow.
+    - Hard bounded re-planning loop at `MAX_REPLANS = 2`.
+    - Preserved completed steps (`current_step = len(completed)`) to prevent duplicate execution of consequential actions.
+    - Enforced full schema and confirmation re-validation on revised plans through `validate_plan`.
+  - Security Trust Boundary Hardening:
+    - Strictly eliminated confirmation tokens from assistant voice speech, text responses, LLM history, and SQLite persistence. Spoken output says only: *"VoxPilot needs your approval before performing this action. Please review the pending confirmation in the application."*
+    - Enforced single-use token consumption (`validate_and_consume`) and parameter tamper detection excluding transient token metadata.
+    - Rejected cross-execution approval attempts with HTTP 403 Forbidden.
+  - Extended [`backend/api/agent.py`](./backend/api/agent.py) and [`backend/main.py`](./backend/main.py):
+    - Added `GET /agent/conversations`, `GET /agent/conversations/{id}`, and `GET /agent/conversations/{id}/executions`.
+    - Added database fallback for `GET /agent/status/{id}` when execution is evicted from memory.
+    - Added FastAPI lifespan handler for async database initialization on application startup and disposal on shutdown.
+  - Added Git exclusion in [`.gitignore`](./.gitignore) for `*.db`, `*.sqlite`, `*.sqlite3`, `data/`, and `backend/data/`.
+  - Created comprehensive test suites:
+    - [`tests/test_database.py`](./tests/test_database.py): 10 unit tests for models, repository async/sync CRUD, sanitization, and multi-session persistence.
+    - [`tests/test_conversation_memory.py`](./tests/test_conversation_memory.py): 9 unit tests for sliding window bounds, pronoun resolution, ordinal references, ambiguity detection, conversation isolation, and target revalidation.
+    - [`tests/test_dynamic_replanning.py`](./tests/test_dynamic_replanning.py): 8 unit tests for file discovery path binding, multi-match clarification, zero-match notification, HWND binding, failure aborts, schema rejection, `MAX_REPLANS` limit, and step preservation.
+    - Extended [`tests/test_agent_api.py`](./tests/test_agent_api.py): Added database fallback and conversation management endpoint tests (13/13 passing).
+  - Total automated test suite expanded to 445 unit/integration tests + 3 live tests = 448 automated tests (all passing).
+- Phase 4 Step 1: LangGraph Agent Execution and Tool Integration:
+  - Created [`backend/agent/tool_registry.py`](./backend/agent/tool_registry.py):
+    - Centralized secure registry mapping approved action names to immutable `ToolDefinition` dataclasses.
+    - Pydantic schema validation rejecting invalid arguments and prohibiting unknown/injected parameters (extra-parameter injection protection).
+    - Natural language action aliases (`open_application`, `activate_window`, `press_keys`, `click`, `take_screenshot`, `search_web`, `browse`).
+    - Backend confirmation policy determination (`check_confirmation_required`) stripping transient credentials to guarantee parameter hash tamper-detection integrity.
+    - Custom exceptions: `ToolRegistryError`, `UnknownToolError`, `ToolArgumentValidationError`.
+  - Created [`backend/agent/tool_executor.py`](./backend/agent/tool_executor.py):
+    - Execution gateway enforcing the cryptographic confirmation trust boundary (`ConfirmationManager`).
+    - LLM self-approval defense: hallucinated confirmation flags (`confirmed=True`, `is_consequential=False`) cannot bypass backend confirmation checkpoints.
+    - Universally extracts structured execution results from both Pydantic models and dictionary outputs.
+  - Created [`backend/tools/system.py`](./backend/tools/system.py):
+    - Safe read-only system metrics tool (`get_system_info_tool`) using `psutil` and `platform`.
+    - Returns OS platform, CPU percentage, and memory usage without shell commands or command-line invocation.
+  - Extended [`backend/agent/state.py`](./backend/agent/state.py):
+    - Added `current_step`, `current_action`, `current_execution_result`, `execution_results`, `completed_steps`, `failed_steps`, `pending_confirmation`, and `execution_id` to `VoxPilotState`.
+  - Implemented [`backend/agent/graph.py`](./backend/agent/graph.py):
+    - Compiled 6-node LangGraph `StateGraph(VoxPilotState)`: `recognize_intent`, `create_plan`, `validate_plan`, `execute_tool`, `evaluate_result`, and `generate_response`.
+    - Sequential multi-step execution loop with immediate failure halt (no false successes).
+    - Seamless execution resumption (`resume_execution`) from human approval without re-planning.
+  - Created [`backend/api/agent.py`](./backend/api/agent.py) and [`backend/main.py`](./backend/main.py):
+    - Safe FastAPI endpoints: `POST /agent/execute`, `GET /agent/status/{id}`, `GET /agent/confirmations/{id}`, `POST /agent/confirmations/{id}/approve`, `POST /agent/confirmations/{id}/reject`, `GET /agent/tools`, `GET /health`, and `GET /`.
+    - Backed by thread-safe in-memory session store (`_EXECUTIONS`, `threading.Lock`).
+  - Updated [`backend/voice/voice_pipeline.py`](./backend/voice/voice_pipeline.py):
+    - Unified voice and REST agent invocation with dependency-injected `VoxPilotAgent`.
+  - Created comprehensive test suites:
+    - [`tests/test_tool_registry.py`](./tests/test_tool_registry.py): 10 unit tests for tool registration, alias resolution, unknown tool rejection, parameter validation, and confirmation checks.
+    - [`tests/test_agent_execution.py`](./tests/test_agent_execution.py): 15 unit and integration tests for plan validation, tool execution loops, failure stops, confirmation pauses, adversarial bypass prevention, and execution resumption.
+    - [`tests/test_agent_api.py`](./tests/test_agent_api.py): 11 integration tests covering health endpoints, execute, status, confirmation inspection, approval, rejection, token mismatch rejection, and tool enumeration.
+  - Full project test suite grew to 416 unit tests + 3 live tests = 419 automated tests (all passing).
+- Phase 3 Final Security Remediation and Safe Browser Automation:
+  - Cryptographic confirmation trust boundary (`backend/automation/confirmation_manager.py`).
+  - Safe Playwright Chromium browser automation (`backend/automation/browser_controller.py`, `backend/tools/browser.py`).
+  - Safe browser file downloads with containment, executable blocking, and overwrite tokens.
+  - SSRF protection with DNS pre-resolution and non-standard IP format rejection.
+  - Filesystem management (`backend/automation/file_manager.py`, `backend/tools/files.py`).
+  - Screenshot capture (`backend/automation/screenshot_controller.py`, `backend/tools/screenshots.py`).
+  - Keyboard and mouse automation (`backend/automation/keyboard_controller.py`, `backend/automation/mouse_controller.py`).
+  - Windows window management and application launching (`backend/automation/window_manager.py`, `backend/automation/application_launcher.py`).
 - Integrated [`backend/voice/voice_pipeline.py`](./backend/voice/voice_pipeline.py) coordinating end-to-end microphone listening, Faster-Whisper recognition, and Piper TTS playback.
 - Acquired Piper neural voice model weights: `models/piper/en_US-lessac-medium.onnx` and JSON configuration.
 - Comprehensive update to [`README.md`](./README.md) covering full architecture, hardware specifications, current roadmap status, voice subsystem pipeline, and modular setup instructions.

@@ -36,11 +36,11 @@ VoxPilot is an intelligent, privacy-first personal desktop control assistant for
 
 | Milestone | Scope | Status | Notes |
 |---|---|---|---|
-| **Phase 1: Foundation** | Environment, dependencies, config, Ollama | **In Progress** | Python 3.12 `.venv` active, modular requirements, Ollama verified |
-| **Phase 2: Voice Interface** | Microphone capture, STT, TTS, Pipeline | **Completed** | Full voice round-trip working (`VoicePipeline`) |
-| **Phase 3: Desktop Automation** | App launch, window control, files | *Pending* | Scaffolding created in `backend/tools/` |
-| **Phase 4: Agent Integration** | LangGraph state, Ollama tool calling | *Pending* | Scaffolding created in `backend/agent/` |
-| **Phase 5: Agent Safety** | Checkpoints, confirmations, emergency stop | *Pending* | Planned safety layer |
+| **Phase 1: Foundation** | Environment, dependencies, config, Ollama | **Completed** | Python 3.12 `.venv` active, modular requirements, Ollama verified |
+| **Phase 2: Voice Interface** | Microphone capture, STT, TTS, Pipeline | **Completed** | Full voice round-trip working (`VoicePipeline`, 73 tests) |
+| **Phase 3: Desktop & Browser Automation** | App launch, windows, keyboard/mouse, files, screenshots, browser, confirmation manager | **Completed & Approved** | Full desktop & browser automation engine complete (380 unit tests, 3 live tests) |
+| **Phase 4: Agent Integration** | LangGraph StateGraph, tool registry (37 tools, 11 aliases), tool executor, SQLite persistence, conversational memory, dynamic replanning, FastAPI API | **Completed & Approved** | 6-node LangGraph execution loop, dynamic replanner, 483 total tests passing (0 failed) |
+| **Phase 5: Agent Safety** | Global emergency stop, hotkey listener, input release, safe cancellation, safety guardrails | **In Progress (Step 5.1 Complete)** | Global hotkey `Ctrl+Alt+Escape`, fail-closed operation tracking, safe reset validation, 522 tests passing |
 | **Phase 6: Frontend** | React + Vite UI dashboard | *Pending* | Scaffolding in `frontend/` |
 | **Phase 7: Packaging** | PyInstaller Windows executable | *Pending* | Test suite active in `tests/` |
 
@@ -65,8 +65,11 @@ VoxPilot/
 │   ├── main.py                    # FastAPI entrypoint (health & WebSocket routes)
 │   ├── voice/                     # Voice subsystem (Phase 2 completed)
 │   │   ├── __init__.py
+│   │   ├── wake_word.py           # Offline wake-word detection (openWakeWord ONNX)
 │   │   ├── audio_recorder.py      # Microphone capture & device enumeration
-│   │   ├── speech_to_text.py      # Faster-Whisper transcription engine
+│   │   ├── streaming_vad.py       # Real-time WebRTC streaming speech detector
+│   │   ├── audio_preprocessor.py  # Software peak gain normalizer (-3 dBFS)
+│   │   ├── speech_to_text.py      # Faster-Whisper transcription engine + Silero VAD
 │   │   ├── text_to_speech.py      # Piper TTS ONNX synthesis engine
 │   │   └── voice_pipeline.py      # Unified Listen -> Transcribe -> Speak pipeline
 │   ├── agent/                     # LangGraph workflows and planner
@@ -74,23 +77,50 @@ VoxPilot/
 │   │   ├── planner.py
 │   │   └── state.py
 │   ├── tools/                     # Allowlisted automation tools
-│   │   ├── applications.py        # Windows application launcher & process control
+│   │   ├── __init__.py
+│   │   ├── applications.py        # Safe application launch tool wrapper (Pydantic)
+│   │   ├── windows.py             # Window discovery & management tool wrapper (Pydantic)
+│   │   ├── keyboard.py            # Keyboard action tool wrappers (type, press, shortcut)
+│   │   ├── mouse.py               # Mouse action tool wrappers (move, click, scroll)
+│   │   ├── files.py               # Safe file & directory operations (list, search, move, delete)
+│   │   ├── screenshots.py         # Safe screenshot capture tools (desktop, monitor, window)
 │   │   ├── browser.py             # Playwright browser interactions
-│   │   ├── files.py               # Safe file & directory operations
 │   │   └── system.py              # System stats & hardware monitoring (psutil)
 │   ├── automation/                # Desktop execution wrappers
-│   ├── memory/                    # SQLite context & session stores
-│   └── api/                       # Route handlers
+│   │   ├── __init__.py
+│   │   ├── application_launcher.py # Safe application discovery & launching engine
+│   │   ├── window_manager.py      # Window discovery, validation & management engine
+│   │   ├── keyboard_controller.py # Low-level Win32 SendInput keyboard engine
+│   │   ├── mouse_controller.py    # Multi-monitor bounds-checked mouse engine
+│   │   ├── file_manager.py        # Safe filesystem engine with approved directory boundaries
+│   │   ├── screenshot_controller.py # Desktop, monitor & window screenshot engine
+│   │   └── browser_controller.py  # Safe Playwright browser engine with profile isolation
+│   ├── database/                  # SQLite persistence (SQLModel + aiosqlite)
+│   │   ├── models.py              # Conversation, execution & step records
+│   │   ├── connection.py          # Async & sync engine factories
+│   │   └── repository.py          # Database repository with CRUD operations
+│   ├── memory/                    # Short-term conversational memory
+│   │   └── context_manager.py     # Multi-turn context manager & reference resolution
+│   └── api/                       # FastAPI REST API routes
+│       └── agent.py               # Agent execution, confirmation & conversation routes
 │
 ├── frontend/                      # React + Vite user interface
 ├── models/                        # Offline model storage
+│   ├── wake_word/                 # Wake word models & training guidelines
 │   └── piper/                     # Piper TTS ONNX weights & generated audio
 │       ├── en_US-lessac-medium.onnx
 │       ├── en_US-lessac-medium.onnx.json
 │       └── generated/
 │
 ├── tests/                         # Automated test suites
-│   └── test_voice.py              # Voice subsystem unit tests (7/7 passing)
+│   ├── test_voice.py              # Voice subsystem component tests
+│   ├── test_microphone_selection.py # Hardware discovery & resampling tests
+│   ├── test_audio_preprocessor.py # Gain normalization & clipping protection tests
+│   ├── test_vad.py                # Batch Silero VAD tests
+│   ├── test_streaming_vad.py      # Real-time WebRTC streaming VAD tests
+│   ├── test_wake_word.py          # Offline wake word tests
+│   ├── test_application_launcher.py # Safe application launching tests
+│   └── test_window_manager.py     # Window identification & management tests (151 unit tests passing)
 │
 ├── docs/                          # Architecture & design documentation
 ├── .env.example                   # Environment configuration template
@@ -109,22 +139,28 @@ VoxPilot/
 
 ## 🎙️ Voice Subsystem Overview
 
-The voice subsystem (`backend/voice/`) provides end-to-end local speech interaction:
+The voice subsystem (`backend/voice/`) provides end-to-end local speech interaction with real-time streaming endpoint detection, software gain normalization, neural ASR, and neural TTS:
 
 ```
-[ Microphone ]
+[ Idle Microphone Monitoring ]
       │
       ▼
-AudioRecorder.record()
+WakeWordDetector.listen_for_wake_word()  <── openWakeWord (80 ms frames, ONNX CPU)
+      │ (Wake Word Detected! Stream Closed Cleanly)
+      ▼
+AudioRecorder.record_until_silence()     <── WebRTC Streaming VAD (Real-time endpointing)
       │
-      ▼ (float32 numpy array)
-SpeechToText.transcribe_audio()  <── Faster-Whisper (base, INT8/FP16)
+      ▼ (16 kHz mono float32)
+AudioPreprocessor.process()              <── Controlled Peak Gain Normalization (-3.0 dBFS)
+      │
+      ▼
+SpeechToText.transcribe_audio()          <── Faster-Whisper + Batch Silero VAD Filter
       │
       ▼ (transcribed text)
-[ Agent / User ]
+[ VoxPilot Agent / Ollama Qwen3 4B ]
       │
       ▼ (response text)
-TextToSpeech.text_to_speech()   <── Piper TTS (en_US-lessac-medium.onnx)
+TextToSpeech.text_to_speech()            <── Piper TTS (en_US-lessac-medium.onnx)
       │
       ▼ (.wav output)
 SoundDevice Playback
@@ -149,6 +185,30 @@ pipeline.initialize()
 result = pipeline.run_once(duration=5)
 print(f"Recognized: {result['recognized_text']}")
 ```
+
+### 🛑 Global Emergency Stop
+
+VoxPilot includes an operating-system-level emergency stop feature providing instant, safe cancellation of all desktop and browser automation:
+
+- **Windows Global Hotkey:** Press **`Ctrl + Alt + Escape`** anywhere in Windows to trigger emergency stop immediately.
+  - Native Win32 `RegisterHotKey` listener runs on an independent background thread.
+  - Immediately releases physical modifier keys (Ctrl, Alt, Shift, LWin, RWin) and mouse buttons (left, right, middle).
+  - Terminate and unregister cleanly upon application shutdown.
+- **Fail-Closed Architecture:**
+  - Once triggered, the stop state latches active.
+  - In-flight keyboard typing, mouse clicks, and Playwright browser sessions abort safely.
+  - LangGraph workflows halt immediately, recording truthful `cancelled` status and preserving completed steps.
+  - New operation registrations are strictly rejected.
+  - Dynamic re-planning is blocked while emergency stop is active.
+- **Safe Explicit Reset:**
+  - Resets cannot be initiated by the LLM (reset is strictly omitted from `ToolRegistry`).
+  - Restoring automation requires explicit operator action via the UI or `POST /agent/emergency-stop/reset`.
+  - Rejects reset with HTTP 409 Conflict if active operations are still in-flight, preventing unsafe mid-action resumption.
+  - Reset never auto-resumes interrupted executions.
+- **REST API Endpoints:**
+  - `POST /agent/emergency-stop`: Immediate trigger.
+  - `GET /agent/emergency-stop/status`: Status query returning latch status and active operations.
+  - `POST /agent/emergency-stop/reset`: Explicit reset validating safe terminal state.
 
 ---
 
@@ -192,10 +252,14 @@ Copy the template environment file:
 Copy-Item .env.example .env
 ```
 
-### 5. Run Voice Subsystem Tests
+### 5. Run Test Suite
 
 ```powershell
-pytest tests/test_voice.py -v
+# Run full unit and safety test suite (519 tests)
+pytest tests/ -v -m "not live"
+
+# Run opt-in live tests (Notepad launch/window management and controlled browser automation)
+pytest -m live -v
 ```
 
 ---

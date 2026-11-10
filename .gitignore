@@ -22,6 +22,13 @@ env/
 *.wav
 *.mp3
 
+# Databases and data directory
+*.db
+*.sqlite
+*.sqlite3
+data/
+backend/data/
+
 # Downloaded AI models
 models/**/*.onnx
 models/**/*.onnx.json
