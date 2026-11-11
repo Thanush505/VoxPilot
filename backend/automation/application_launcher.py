@@ -26,10 +26,57 @@ try:
 except ImportError:
     psutil = None  # type: ignore
 
+from backend.automation.application_discovery import (
+    ApplicationDiscoveryService,
+    DiscoveredApplication,
+    FORBIDDEN_SHELL_CHARS,
+    PROHIBITED_EXECUTABLES,
+    WINDOWS_BUILT_IN_UTILITIES,
+    WINDOWS_SETTINGS_DESTINATIONS,
+    WINDOWS_SPECIAL_FOLDERS,
+    get_shared_discovery_service,
+    is_suspicious_or_temporary_path,
+    parse_windows_lnk,
+    validate_executable_target,
+    validate_shortcut_arguments,
+)
+
 logger = logging.getLogger(__name__)
 
 # Regex detecting forbidden shell chaining characters in registry values
 FORBIDDEN_REG_CHARS = re.compile(r"[;&|><`$\r\n]")
+
+# Prohibited application queries (shells, interpreters, registry editors, malware test tokens)
+PROHIBITED_QUERY_NAMES = {
+    "cmd",
+    "cmd.exe",
+    "command prompt",
+    "powershell",
+    "powershell.exe",
+    "pwsh",
+    "pwsh.exe",
+    "regedit",
+    "regedit.exe",
+    "registry editor",
+    "mshta",
+    "mshta.exe",
+    "wscript",
+    "wscript.exe",
+    "cscript",
+    "cscript.exe",
+    "rundll32",
+    "rundll32.exe",
+    "regsvr32",
+    "regsvr32.exe",
+    "certutil",
+    "certutil.exe",
+    "bitsadmin",
+    "bitsadmin.exe",
+    "bash",
+    "bash.exe",
+    "wsl",
+    "wsl.exe",
+}
 
 
 class ApplicationLauncherError(Exception):
@@ -38,13 +85,32 @@ class ApplicationLauncherError(Exception):
 
 
 class ApplicationNotAllowedError(ApplicationLauncherError):
-    """Raised when a requested application is not present on the approved allowlist."""
+    """Raised when a requested application is blocked by security policy or not on the allowlist."""
+    pass
+
+
+class UnsafeExecutablePathError(ApplicationNotAllowedError):
+    """Raised when an executable target resides in an unsafe, temporary, or prohibited path."""
     pass
 
 
 class ApplicationNotFoundError(ApplicationLauncherError):
-    """Raised when an approved application's executable cannot be located on the system."""
+    """Raised when a requested application cannot be located on the system."""
     pass
+
+
+class AmbiguousApplicationError(ApplicationLauncherError):
+    """Raised when multiple installed applications closely match a user query."""
+
+    def __init__(
+        self,
+        message: str,
+        candidates: Optional[List[str]] = None,
+        entries: Optional[List[DiscoveredApplication]] = None,
+    ):
+        super().__init__(message)
+        self.candidates: List[str] = candidates or []
+        self.entries: List[DiscoveredApplication] = entries or []
 
 
 @dataclass(frozen=True)
@@ -346,14 +412,54 @@ class ApplicationRegistry:
 
 
 class ApplicationLauncher:
-    """Discovers, validates, and launches approved Windows applications safely."""
+    """Discovers, validates, and launches Windows applications safely."""
 
-    def __init__(self, registry: Optional[ApplicationRegistry] = None):
+    def __init__(
+        self,
+        registry: Optional[ApplicationRegistry] = None,
+        discovery_service: Optional[ApplicationDiscoveryService] = None,
+    ):
+        self._has_custom_registry = registry is not None
         self.registry = registry if registry is not None else ApplicationRegistry()
+        self._discovery_service = discovery_service
+
+    @property
+    def discovery_service(self) -> ApplicationDiscoveryService:
+        """Lazy accessor for the ApplicationDiscoveryService."""
+        if self._discovery_service is None:
+            self._discovery_service = get_shared_discovery_service()
+        return self._discovery_service
 
     def resolve_application(self, query: str) -> ApplicationConfig:
-        """Resolve a user-provided application query using the registry."""
+        """Resolve a user-provided application query using the static registry."""
         return self.registry.resolve(query)
+
+    @staticmethod
+    def _validate_query_security(query: str) -> str:
+        """Ensure the query does not contain path traversal, shell operators, or prohibited shells."""
+        normalized = ApplicationRegistry.normalize_query(query)
+        raw_clean = query.strip().strip("'\"")
+
+        if "/" in raw_clean or "\\" in raw_clean or ":" in raw_clean:
+            raise ApplicationNotAllowedError(
+                f"Application query '{query}' contains path separators or URI schemes and is not on the approved application allowlist."
+            )
+
+        if FORBIDDEN_REG_CHARS.search(raw_clean):
+            raise ApplicationNotAllowedError(
+                f"Application query '{query}' contains forbidden shell metacharacters and is not on the approved application allowlist."
+            )
+
+        if (
+            normalized in PROHIBITED_QUERY_NAMES
+            or f"{normalized}.exe" in PROHIBITED_EXECUTABLES
+            or "malware" in normalized
+        ):
+            raise ApplicationNotAllowedError(
+                f"Application '{query}' is not on the approved application allowlist."
+            )
+
+        return normalized
 
     def _query_registry_app_path(
         self,
@@ -430,27 +536,213 @@ class ApplicationLauncher:
             f"Checked approved candidate paths and Windows App Paths for '{expected_binary}'."
         )
 
-    def launch(self, query: str) -> Dict[str, Any]:
-        """Safely launch an approved application.
+    @staticmethod
+    def _resolve_special_folder_arguments(args: List[str]) -> List[str]:
+        """Resolve canonical folder placeholders for WINDOWS_SPECIAL_FOLDERS."""
+        home = Path.home()
+        mapping = {
+            "__USER_DOWNLOADS__": str((home / "Downloads").resolve()),
+            "__USER_DOCUMENTS__": str((home / "Documents").resolve()),
+            "__USER_DESKTOP__": str((home / "Desktop").resolve()),
+            "__USER_PICTURES__": str((home / "Pictures").resolve()),
+        }
+        resolved: List[str] = []
+        for arg in args:
+            if arg in mapping:
+                resolved.append(mapping[arg])
+            else:
+                resolved.append(arg)
+        return resolved
 
-        Enforces:
-        - Strict allowlist resolution.
-        - Verified executable path on disk.
-        - shell=False argument list execution.
-        - Zero arbitrary arguments.
+    def _build_validated_command_for_entry(self, entry: DiscoveredApplication) -> List[str]:
+        """Revalidate a DiscoveredApplication on disk and construct a safe shell=False argument array."""
+        method = entry.launch_method
 
-        Returns:
-            Dict[str, Any]: Structured launch result dictionary.
+        # 1. Standard desktop executable
+        if method == "executable":
+            raw_target = entry.executable_path or ""
+            if not raw_target:
+                raise ApplicationNotFoundError(
+                    f"Application '{entry.display_name}' has no executable path configured."
+                )
+            expanded_target = Path(os.path.expandvars(raw_target))
+            if expanded_target.name.lower() in PROHIBITED_EXECUTABLES:
+                raise UnsafeExecutablePathError(
+                    f"Executable '{raw_target}' for '{entry.display_name}' is blocked by security policy."
+                )
+            if not expanded_target.is_file():
+                raise ApplicationNotFoundError(
+                    f"Executable for '{entry.display_name}' was not found on disk at '{raw_target}'. "
+                    "The application may have been uninstalled or moved; try refreshing the application index."
+                )
+            if is_suspicious_or_temporary_path(expanded_target):
+                raise UnsafeExecutablePathError(
+                    f"Executable path '{raw_target}' for '{entry.display_name}' is blocked by security policy."
+                )
+            ok_exe, validated_exe, reason = validate_executable_target(raw_target)
+            if not ok_exe or validated_exe is None:
+                raise UnsafeExecutablePathError(
+                    f"Executable '{raw_target}' for '{entry.display_name}' failed security validation: {reason}"
+                )
+            raw_args = " ".join(entry.arguments) if entry.arguments else ""
+            ok_args, safe_args = validate_shortcut_arguments(raw_args)
+            if not ok_args:
+                raise UnsafeExecutablePathError(
+                    f"Arguments for '{entry.display_name}' contain forbidden shell operators."
+                )
+            return [str(validated_exe), *safe_args]
 
-        Raises:
-            ApplicationNotAllowedError: If the application is not approved.
-            ApplicationNotFoundError: If the executable is missing.
-            ApplicationLauncherError: If process creation fails.
-        """
-        config = self.resolve_application(query)
+        # 2. Windows Start Menu / Desktop Shortcut (.lnk)
+        if method == "shortcut":
+            raw_lnk = entry.shortcut_path or ""
+            if raw_lnk:
+                lnk_path = Path(os.path.expandvars(raw_lnk))
+                if not lnk_path.is_file() or lnk_path.suffix.lower() != ".lnk":
+                    raise ApplicationNotFoundError(
+                        f"Shortcut for '{entry.display_name}' is missing or invalid at '{raw_lnk}'."
+                    )
+                if is_suspicious_or_temporary_path(lnk_path):
+                    raise UnsafeExecutablePathError(
+                        f"Shortcut '{raw_lnk}' resides in an untrusted or temporary directory."
+                    )
+
+            target_exe = entry.executable_path
+            parsed_args_str = " ".join(entry.arguments) if entry.arguments else ""
+            if not target_exe and raw_lnk:
+                parsed = parse_windows_lnk(Path(os.path.expandvars(raw_lnk)))
+                if parsed:
+                    target_exe, parsed_args_str, _ = parsed
+
+            if not target_exe:
+                raise ApplicationNotFoundError(
+                    f"Shortcut target executable for '{entry.display_name}' could not be resolved."
+                )
+
+            expanded_target = Path(os.path.expandvars(target_exe))
+            if expanded_target.name.lower() in PROHIBITED_EXECUTABLES:
+                raise UnsafeExecutablePathError(
+                    f"Shortcut target '{target_exe}' for '{entry.display_name}' is blocked by security policy."
+                )
+            if not expanded_target.is_file():
+                raise ApplicationNotFoundError(
+                    f"Shortcut target executable for '{entry.display_name}' does not exist at '{target_exe}'."
+                )
+            if is_suspicious_or_temporary_path(expanded_target):
+                raise UnsafeExecutablePathError(
+                    f"Shortcut target '{target_exe}' for '{entry.display_name}' is blocked by security policy."
+                )
+            ok_exe, validated_exe, reason = validate_executable_target(target_exe)
+            if not ok_exe or validated_exe is None:
+                raise UnsafeExecutablePathError(
+                    f"Shortcut target '{target_exe}' for '{entry.display_name}' failed security validation: {reason}"
+                )
+            ok_args, safe_args = validate_shortcut_arguments(parsed_args_str)
+            if not ok_args:
+                raise UnsafeExecutablePathError(
+                    f"Shortcut arguments for '{entry.display_name}' contain forbidden shell operators."
+                )
+            return [str(validated_exe), *safe_args]
+
+        # 3. Microsoft Store / MSIX / Appx packaged app
+        if method == "store_app":
+            shell_target = (entry.executable_path or "").strip()
+            if not shell_target.startswith("shell:AppsFolder\\") or FORBIDDEN_SHELL_CHARS.search(shell_target):
+                raise UnsafeExecutablePathError(
+                    f"Invalid or unsafe Microsoft Store AppID target for '{entry.display_name}'."
+                )
+            aumid = shell_target[len("shell:AppsFolder\\"):]
+            if not aumid or "!" not in aumid or ".." in aumid:
+                raise UnsafeExecutablePathError(
+                    f"Malformed Microsoft Store AUMID '{aumid}' for '{entry.display_name}'."
+                )
+            explorer_exe = Path(r"C:\Windows\explorer.exe")
+            return [str(explorer_exe), shell_target]
+
+        # 4. Windows Settings URI (strictly validated against fixed allowlist)
+        if method == "settings_uri":
+            spec = WINDOWS_SETTINGS_DESTINATIONS.get(entry.app_id)
+            if spec is None or entry.executable_path != spec.target or not spec.target.startswith("ms-settings:"):
+                raise ApplicationNotAllowedError(
+                    f"Windows Settings URI for '{entry.display_name}' is not on the approved Settings allowlist."
+                )
+            if FORBIDDEN_SHELL_CHARS.search(spec.target):
+                raise ApplicationNotAllowedError("Invalid characters in Windows Settings URI.")
+            explorer_exe = Path(r"C:\Windows\explorer.exe")
+            return [str(explorer_exe), spec.target]
+
+        # 5. Windows Built-In Utility (strictly validated against fixed allowlist)
+        if method == "system_utility":
+            spec = WINDOWS_BUILT_IN_UTILITIES.get(entry.app_id)
+            if spec is None:
+                raise ApplicationNotAllowedError(
+                    f"System utility '{entry.display_name}' is not on the approved utilities allowlist."
+                )
+            target_path = Path(os.path.expandvars(spec.target))
+            if target_path.name.lower() in PROHIBITED_EXECUTABLES:
+                raise ApplicationNotAllowedError(
+                    f"System utility '{entry.display_name}' targets a prohibited executable."
+                )
+            if not target_path.is_file():
+                raise ApplicationNotFoundError(
+                    f"System utility executable for '{entry.display_name}' was not found at '{spec.target}'."
+                )
+            return [str(target_path.resolve()), *spec.arguments]
+
+        # 6. Windows Special Folder (File Explorer, Downloads, Recycle Bin, etc.)
+        if method == "shell_folder":
+            spec = WINDOWS_SPECIAL_FOLDERS.get(entry.app_id)
+            if spec is None:
+                raise ApplicationNotAllowedError(
+                    f"System folder '{entry.display_name}' is not on the approved folders allowlist."
+                )
+            explorer_exe = Path(r"C:\Windows\explorer.exe")
+            resolved_args = self._resolve_special_folder_arguments(spec.arguments)
+            return [str(explorer_exe), *resolved_args]
+
+        raise ApplicationNotAllowedError(
+            f"Unsupported launch method '{method}' for '{entry.display_name}'."
+        )
+
+    def launch_discovered_application(self, entry: DiscoveredApplication) -> Dict[str, Any]:
+        """Validate on disk and launch a DiscoveredApplication entry with shell=False."""
+        cmd_args = self._build_validated_command_for_entry(entry)
+
+        try:
+            logger.info(
+                f"Launching discovered application: {entry.display_name} "
+                f"(id={entry.app_id}, method={entry.launch_method}, source={entry.source}) -> {cmd_args}"
+            )
+            process = subprocess.Popen(
+                cmd_args,
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            pid = process.pid
+            logger.info(f"Successfully spawned '{entry.display_name}' with PID: {pid}")
+
+            return {
+                "success": True,
+                "app_id": entry.app_id,
+                "display_name": entry.display_name,
+                "pid": pid,
+                "status": "launched",
+                "launch_method": entry.launch_method,
+                "source": entry.source,
+                "requires_confirmation": entry.requires_confirmation,
+                "message": f"Successfully launched {entry.display_name} (PID: {pid}).",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        except (OSError, PermissionError) as err:
+            logger.error(f"Failed to spawn process for '{entry.display_name}': {err}")
+            raise ApplicationLauncherError(
+                f"Failed to launch '{entry.display_name}': {err}"
+            ) from err
+
+    def _launch_via_static_config(self, config: ApplicationConfig) -> Dict[str, Any]:
+        """Launch an application using a static ApplicationConfig specification."""
         executable_path = self.find_executable(config)
-
-        # Enforce strict argument list with shell=False
         cmd_args = [str(executable_path)]
 
         try:
@@ -471,36 +763,101 @@ class ApplicationLauncher:
                 "display_name": config.display_name,
                 "pid": pid,
                 "status": "launched",
+                "launch_method": "executable",
+                "source": "static_registry",
+                "requires_confirmation": config.requires_confirmation,
                 "message": f"Successfully launched {config.display_name} (PID: {pid}).",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
-
         except (OSError, PermissionError) as err:
             logger.error(f"Failed to spawn process for '{config.display_name}': {err}")
             raise ApplicationLauncherError(
                 f"Failed to launch '{config.display_name}' at '{executable_path}': {err}"
             ) from err
 
-    def is_running(self, query: str) -> bool:
-        """Check whether an approved application currently has an active running process.
+    def launch(self, query: str) -> Dict[str, Any]:
+        """Safely resolve, validate, and launch a requested Windows application or destination.
 
-        Args:
-            query: Natural language application name or alias.
+        Enforces:
+        - Prohibited binary and shell injection rejection.
+        - Verified executable, shortcut, Store AppID, or allowlisted Settings/Utility target.
+        - shell=False argument list execution.
 
         Returns:
-            bool: True if at least one matching process is found, False otherwise.
+            Dict[str, Any]: Structured launch result dictionary.
+
+        Raises:
+            ApplicationNotAllowedError: If the application or path is blocked by security policy.
+            AmbiguousApplicationError: If multiple installed applications closely match the query.
+            ApplicationNotFoundError: If the application is not installed or its executable is missing.
+            ApplicationLauncherError: If process creation fails.
         """
-        config = self.resolve_application(query)
+        self._validate_query_security(query)
+
+        # If a custom ApplicationRegistry was explicitly injected (e.g. unit tests), use it directly
+        if self._has_custom_registry:
+            config = self.resolve_application(query)
+            return self._launch_via_static_config(config)
+
+        # Universal dynamic discovery resolution
+        resolution = self.discovery_service.resolve_query(query)
+        status = resolution.get("status")
+
+        if status == "ambiguous":
+            entries: List[DiscoveredApplication] = resolution.get("candidates", [])
+            names = [c.display_name for c in entries]
+            raise AmbiguousApplicationError(
+                resolution.get("message") or f"Multiple applications match '{query}': {', '.join(names)}.",
+                candidates=names,
+                entries=entries,
+            )
+
+        if status == "resolved":
+            entry: DiscoveredApplication = resolution["match"]
+            return self.launch_discovered_application(entry)
+
+        # Fallback: check core static registry if discovery index did not find it
+        try:
+            config = self.registry.resolve(query)
+            return self._launch_via_static_config(config)
+        except ApplicationNotAllowedError:
+            pass
+
+        raise ApplicationNotFoundError(
+            resolution.get("message")
+            or f"Application '{query}' could not be found on this Windows system. Verify that it is installed or refresh the application index."
+        )
+
+    def is_running(self, query: str) -> bool:
+        """Check whether an application currently has an active running process."""
         if psutil is None:
             return False
 
-        expected_names = {
-            f"{config.app_id}.exe".lower(),
-            (config.registry_app_path or "").lower(),
-        }
-        for cand in config.executable_candidates:
-            expected_names.add(cand.name.lower())
+        expected_names = set()
+        try:
+            config = self.resolve_application(query)
+            expected_names.add(f"{config.app_id}.exe".lower())
+            if config.registry_app_path:
+                expected_names.add(config.registry_app_path.lower())
+            for cand in config.executable_candidates:
+                expected_names.add(cand.name.lower())
+        except ApplicationNotAllowedError:
+            if not self._has_custom_registry:
+                resolution = self.discovery_service.resolve_query(query)
+                if resolution.get("status") == "resolved":
+                    entry: DiscoveredApplication = resolution["match"]
+                    if entry.executable_path and not entry.executable_path.startswith(("ms-settings:", "shell:")):
+                        expected_names.add(Path(entry.executable_path).name.lower())
+                    else:
+                        expected_names.add(f"{entry.app_id}.exe".lower())
+                else:
+                    raise
+            else:
+                raise
+
         expected_names.discard("")
+        if not expected_names:
+            return False
 
         try:
             for proc in psutil.process_iter(["name", "exe"]):
@@ -514,6 +871,6 @@ class ApplicationLauncher:
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                     continue
         except Exception as err:
-            logger.warning(f"Error checking running processes for '{config.display_name}': {err}")
+            logger.warning(f"Error checking running processes for '{query}': {err}")
 
         return False

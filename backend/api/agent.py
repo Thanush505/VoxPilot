@@ -41,6 +41,19 @@ from backend.voice.voice_service import (
     get_shared_voice_service,
     list_available_piper_voices,
 )
+from backend.automation.application_discovery import get_shared_discovery_service
+from backend.automation.application_launcher import (
+    AmbiguousApplicationError,
+    ApplicationLauncher,
+    ApplicationLauncherError,
+    ApplicationNotAllowedError,
+    ApplicationNotFoundError,
+)
+from backend.agent.tool_registry import get_shared_tool_registry
+from backend.automation.confirmation_manager import (
+    ConfirmationError,
+    get_shared_confirmation_manager,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -927,3 +940,177 @@ async def list_piper_voices_endpoint():
     }
 
 
+# ==============================================================================
+# Application Discovery, Indexing, and Direct Launching Endpoints
+# ==============================================================================
+
+
+class RefreshApplicationsRequest(BaseModel):
+    """Request schema for refreshing the application discovery index."""
+    include_store_apps: bool = Field(default=True)
+
+
+class DirectLaunchApplicationRequest(BaseModel):
+    """Request schema for launching a discovered application from the dashboard."""
+    query: str = Field(..., min_length=1, max_length=120)
+    confirmation_token: Optional[str] = Field(default=None)
+
+
+@router.get("/applications")
+async def list_discovered_applications_endpoint(
+    query: Optional[str] = Query(default=None, max_length=120),
+    source: Optional[str] = Query(default=None, max_length=60),
+    limit: int = Query(default=250, ge=1, le=500),
+):
+    """List or search discovered Windows applications, Store apps, Settings pages, and utilities."""
+    discovery_service = get_shared_discovery_service()
+    items = await anyio.to_thread.run_sync(
+        functools.partial(
+            discovery_service.list_applications,
+            search_query=query,
+            source_filter=source,
+            limit=limit,
+        )
+    )
+    summary = discovery_service.get_index_summary()
+    return {
+        "applications": [item.to_dict() for item in items],
+        "returned_count": len(items),
+        "total_count": summary.get("total_count", len(items)),
+        "by_source": summary.get("by_source", {}),
+        "last_refreshed_at": summary.get("last_refreshed_at"),
+        "errors": summary.get("errors", []),
+    }
+
+
+@router.post("/applications/refresh")
+async def refresh_discovered_applications_endpoint(
+    http_request: Request,
+    req: Optional[RefreshApplicationsRequest] = None,
+):
+    """Rescan the Windows system and refresh the application discovery index."""
+    _verify_trusted_request(http_request)
+    include_store = req.include_store_apps if req is not None else True
+    discovery_service = get_shared_discovery_service()
+    items = await anyio.to_thread.run_sync(
+        functools.partial(discovery_service.refresh_index, include_store_apps=include_store)
+    )
+    summary = discovery_service.get_index_summary()
+    return {
+        "status": "refreshed",
+        "applications": [item.to_dict() for item in items[:250]],
+        "returned_count": min(len(items), 250),
+        "total_count": summary.get("total_count", len(items)),
+        "by_source": summary.get("by_source", {}),
+        "last_refreshed_at": summary.get("last_refreshed_at"),
+        "errors": summary.get("errors", []),
+        "message": f"Application index refreshed ({summary.get('total_count', len(items))} applications indexed).",
+    }
+
+
+@router.post("/applications/launch")
+async def launch_discovered_application_endpoint(
+    http_request: Request,
+    req: DirectLaunchApplicationRequest,
+):
+    """Safely launch a discovered application, Store app, Settings page, or system utility."""
+    _verify_trusted_request(http_request)
+
+    estop = get_shared_emergency_stop_manager()
+    if estop.is_emergency_stop_active():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot launch application while Emergency Stop is active ({estop.trigger_reason}).",
+        )
+
+    query = req.query.strip()
+    registry = get_shared_tool_registry()
+    conf_mgr = get_shared_confirmation_manager()
+    params = {"application_name": query}
+
+    requires_conf, action_type, conf_params = registry.check_confirmation_required(
+        "launch_application", params
+    )
+    if requires_conf:
+        if not req.confirmation_token:
+            pending = conf_mgr.create_confirmation(
+                action_type=action_type,
+                action_params=conf_params,
+                details={
+                    "action": "launch_application",
+                    "description": f"Launch sensitive system utility: {query}",
+                    **conf_params,
+                },
+            )
+            return {
+                "success": False,
+                "status": "confirmation_required",
+                "requires_confirmation": True,
+                "confirmation_token": pending.token,
+                "display_name": query,
+                "message": (
+                    f"Launching '{query}' requires explicit confirmation. "
+                    "Please approve the confirmation request to proceed."
+                ),
+            }
+        try:
+            conf_mgr.validate_and_consume(
+                token=req.confirmation_token,
+                action_type=action_type,
+                action_params=conf_params,
+            )
+        except ConfirmationError as conf_err:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Confirmation verification failed: {conf_err}",
+            )
+
+    launcher = ApplicationLauncher()
+    repo = DatabaseRepository()
+
+    def _do_launch() -> Dict[str, Any]:
+        return launcher.launch(query)
+
+    try:
+        result = await anyio.to_thread.run_sync(_do_launch)
+        try:
+            repo.log_action(
+                execution_id=f"app_launch_{result.get('app_id', 'app')}",
+                step_index=0,
+                action_type="launch_application",
+                parameters={
+                    "application_name": query,
+                    "resolved_app_id": result.get("app_id"),
+                    "launch_method": result.get("launch_method"),
+                    "source": result.get("source"),
+                },
+                status="completed",
+                result_summary=result.get("message", f"Launched {result.get('display_name')}"),
+            )
+        except Exception as log_err:
+            logger.debug("Audit log write warning during application launch: %s", log_err)
+        return result
+
+    except AmbiguousApplicationError as err:
+        return {
+            "success": False,
+            "status": "ambiguous",
+            "display_name": query,
+            "candidates": list(err.candidates),
+            "message": str(err),
+        }
+    except ApplicationNotFoundError as err:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(err),
+        )
+    except ApplicationNotAllowedError as err:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(err),
+        )
+    except ApplicationLauncherError as err:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(err),
+        )

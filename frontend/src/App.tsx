@@ -2,6 +2,7 @@ import { useState } from 'react';
 import AppLayout from './components/layout/AppLayout';
 import DashboardPage from './pages/DashboardPage';
 import AgentPage from './pages/AgentPage';
+import ApplicationsPage from './pages/ApplicationsPage';
 import ExecutionsPage from './pages/ExecutionsPage';
 import ConfirmationsPage from './pages/ConfirmationsPage';
 import AutomationPage from './pages/AutomationPage';
@@ -47,6 +48,12 @@ export function App() {
         return (
           <AgentPage
             onNavigateToConfirmations={() => setCurrentNav('confirmations')}
+            isBackendConnected={isConnected}
+          />
+        );
+      case 'applications':
+        return (
+          <ApplicationsPage
             isBackendConnected={isConnected}
           />
         );

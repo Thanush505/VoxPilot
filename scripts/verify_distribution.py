@@ -1,4 +1,4 @@
-"""Verification script for VoxPilot standalone distribution."""
+﻿"""Verification script for VoxPilot standalone distribution."""
 
 import os
 import subprocess
@@ -126,10 +126,10 @@ def run_tests_against_server(port: int) -> dict:
     try:
         with urllib.request.urlopen(f"{base_url}/api/version", timeout=3.0) as resp:
             ver_data = json.loads(resp.read().decode("utf-8"))
-            assert ver_data.get("installed_version") == "0.5.0"
+            assert ver_data.get("installed_version") == "0.5.1"
         with urllib.request.urlopen(f"{base_url}/api/updates/status", timeout=3.0) as resp:
             upd_data = json.loads(resp.read().decode("utf-8"))
-            assert upd_data.get("installed_version") == "0.5.0"
+            assert upd_data.get("installed_version") == "0.5.1"
             assert upd_data.get("auto_install_enabled") is False
         results["update_system"] = {
             "installed_version": ver_data.get("installed_version"),
@@ -307,3 +307,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

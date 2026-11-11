@@ -413,5 +413,48 @@ export interface UpdateSettings {
   auto_install_enabled: boolean;
 }
 
+/**
+ * Universal Windows Application Discovery & Launching Types
+ */
+export interface DiscoveredApplicationItem {
+  app_id: string;
+  name: string;
+  display_name: string;
+  executable_path: string;
+  source: string;
+  launch_method: string;
+  publisher: string | null;
+  install_location: string | null;
+  package_id: string | null;
+  shortcut_path?: string | null;
+  arguments: string[];
+  aliases: string[];
+  requires_confirmation: boolean;
+  discovered_at: string;
+}
 
+export interface ApplicationsListResponse {
+  status?: string;
+  applications: DiscoveredApplicationItem[];
+  returned_count: number;
+  total_count: number;
+  by_source: Record<string, number>;
+  last_refreshed_at: string | null;
+  errors: string[];
+  message?: string;
+}
 
+export interface DirectLaunchResponse {
+  success: boolean;
+  app_id?: string;
+  display_name: string;
+  pid?: number | null;
+  status: string;
+  launch_method?: string;
+  source?: string;
+  requires_confirmation?: boolean;
+  confirmation_token?: string;
+  candidates?: string[];
+  message: string;
+  timestamp?: string;
+}

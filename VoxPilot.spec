@@ -129,6 +129,7 @@ hiddenimports = [
     'backend.tools.windows',
     'backend.automation.emergency_stop',
     'backend.automation.confirmation_manager',
+    'backend.automation.application_discovery',
     'backend.automation.application_launcher',
     'backend.automation.window_manager',
     'backend.automation.keyboard_controller',

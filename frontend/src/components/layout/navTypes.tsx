@@ -2,6 +2,7 @@ import React from 'react';
 import {
   LayoutDashboard,
   Bot,
+  AppWindow,
   ListOrdered,
   ShieldCheck,
   Cpu,
@@ -28,6 +29,12 @@ export const NAV_ITEMS: NavItemConfig[] = [
     id: 'agent',
     label: 'AI Agent',
     icon: <Bot size={18} />,
+    isFunctional: true,
+  },
+  {
+    id: 'applications',
+    label: 'Applications',
+    icon: <AppWindow size={18} />,
     isFunctional: true,
   },
   {

@@ -27,6 +27,8 @@ import {
   UpdateStatusResponse,
   UpdateSettings,
   UpdateChannel,
+  ApplicationsListResponse,
+  DirectLaunchResponse,
 } from './types';
 
 class ApiClient {
@@ -649,6 +651,70 @@ class ApiClient {
           confirm,
           relaunch,
           shutdown_app: shutdownApp,
+        }),
+      },
+      15000
+    );
+  }
+
+  // ===========================================================================
+  // Universal Windows Application Discovery & Launching API
+  // ===========================================================================
+
+  /**
+   * List or search discovered Windows applications: GET /agent/applications
+   */
+  public async getApplications(
+    query?: string,
+    source?: string,
+    limit: number = 250
+  ): Promise<ApiResponse<ApplicationsListResponse>> {
+    const params = new URLSearchParams();
+    if (query && query.trim()) {
+      params.set('query', query.trim());
+    }
+    if (source && source.trim() && source !== 'all') {
+      params.set('source', source.trim());
+    }
+    params.set('limit', String(limit));
+    const qs = params.toString();
+    return this.request<ApplicationsListResponse>(
+      `/agent/applications${qs ? `?${qs}` : ''}`,
+      {},
+      20000
+    );
+  }
+
+  /**
+   * Refresh the Windows application discovery index: POST /agent/applications/refresh
+   */
+  public async refreshApplications(
+    includeStoreApps: boolean = true
+  ): Promise<ApiResponse<ApplicationsListResponse>> {
+    return this.request<ApplicationsListResponse>(
+      '/agent/applications/refresh',
+      {
+        method: 'POST',
+        body: JSON.stringify({ include_store_apps: includeStoreApps }),
+      },
+      30000
+    );
+  }
+
+  /**
+   * Launch a discovered application, Store app, Settings page, or utility: POST /agent/applications/launch
+   */
+  public async launchApplication(
+    query: string,
+    confirmationToken?: string
+  ): Promise<ApiResponse<DirectLaunchResponse>> {
+    return this.request<DirectLaunchResponse>(
+      '/agent/applications/launch',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          query,
+          confirmation_token: confirmationToken ?? null,
         }),
       },
       15000

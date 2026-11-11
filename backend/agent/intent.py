@@ -90,22 +90,19 @@ class IntentRecognizer:
                 "reason": "User requested window management action.",
             }
 
-        # 3. Application launching
-        # "Open Notepad", "Launch Calculator", "Start VS Code", "Open Chrome"
+        # 3. Application discovery, search, and index refresh
+        # "Show me all installed applications", "List installed apps", "Refresh application index"
         if re.search(
-            r"^(?:open|launch|start|run)\s+(?:notepad|calculator|chrome|vs\s*code|vscode)\b",
+            r"^(?:show|list|search|find|get)\s+(?:me\s+)?(?:all\s+)?(?:installed\s+)?(?:applications|apps|programs)\b",
+            lower,
+        ) or re.search(
+            r"^(?:refresh|rescan|update|rebuild)\s+(?:the\s+)?(?:installed\s+)?(?:application|app)\s+(?:index|list|cache|catalog)\b",
             lower,
         ):
-            if "and type" in lower or "and write" in lower:
-                return {
-                    "intent": "open_application",
-                    "confidence": 0.98,
-                    "reason": "User requested launching application and typing.",
-                }
             return {
                 "intent": "open_application",
                 "confidence": 0.99,
-                "reason": "User requested launching an application.",
+                "reason": "User requested listing, searching, or refreshing installed applications.",
             }
 
         # 4. Filesystem / document management
@@ -129,7 +126,10 @@ class IntentRecognizer:
                 "reason": "User requested file search on disk.",
             }
         if re.search(
-            r"^(?:list|show|open)\s+(?:my\s+)?(?:files|directory|folder|downloads|documents|desktop)\b",
+            r"^(?:list|show)\s+(?:my\s+)?(?:files|directory|folder|downloads|documents|desktop)\b",
+            lower,
+        ) or re.search(
+            r"^open\s+(?:my\s+(?:files|directory|folder|downloads|documents|desktop)|(?:the\s+)?(?:downloads|documents|desktop)\s+folder)\b",
             lower,
         ):
             return {
@@ -137,6 +137,27 @@ class IntentRecognizer:
                 "confidence": 0.98,
                 "reason": "User requested directory inspection.",
             }
+
+        # 4b. Universal Application, Windows Settings, System Utility, and Special Folder Launching
+        # "Open Notepad", "Launch WhatsApp", "Open Spotify", "Start Discord", "Open Visual Studio Code",
+        # "Open Bluetooth Settings", "Open Control Panel", "Open Device Manager", "Open File Explorer", "Open Downloads"
+        open_match = re.search(r"^(?:open|launch|start|run)\s+(.+?)\.?$", lower)
+        if open_match:
+            target = open_match.group(1).strip()
+            is_url = bool(re.search(r"^(?:https?://|www\.)|\.(?:com|org|net|io|gov|edu)\b", target))
+            is_doc_file = bool(re.search(r"\.(?:txt|md|pdf|docx?|xlsx?|pptx?|csv|json|xml|yaml|yml|py|js|ts|html|css|log)$", target))
+            if not is_url and not is_doc_file:
+                if "and type" in lower or "and write" in lower:
+                    return {
+                        "intent": "open_application",
+                        "confidence": 0.98,
+                        "reason": "User requested launching application and typing.",
+                    }
+                return {
+                    "intent": "open_application",
+                    "confidence": 0.99,
+                    "reason": "User requested launching an application, Windows Settings page, or system utility.",
+                }
 
         # 5. System information / screenshots
         if re.search(

@@ -1,10 +1,10 @@
-; ==============================================================================
+﻿; ==============================================================================
 ; VoxPilot - Inno Setup Installer Script
 ; Packages the PyInstaller standalone one-folder distribution into VoxPilot-Setup.exe
 ; ==============================================================================
 
 #define MyAppName "VoxPilot"
-#define MyAppVersion "0.5.0"
+#define MyAppVersion "0.5.1"
 #define MyAppPublisher "VoxPilot Team"
 #define MyAppURL "https://github.com/VoxPilot"
 #define MyAppExeName "VoxPilot.exe"
@@ -45,9 +45,9 @@ SetupIconFile={#MyAppIcon}
 WizardSmallImageFile={#MyAppWizardSmallImage}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
-VersionInfoVersion=0.5.0.0
+VersionInfoVersion=0.5.1.0
 VersionInfoCompany={#MyAppPublisher}
-VersionInfoDescription={#MyAppName} — Personal AI Desktop Control Agent Setup
+VersionInfoDescription={#MyAppName} â€” Personal AI Desktop Control Agent Setup
 VersionInfoProductName={#MyAppName}
 VersionInfoProductVersion={#MyAppVersion}
 VersionInfoCopyright=Copyright (c) 2026 {#MyAppPublisher}
@@ -93,4 +93,5 @@ begin
            mbInformation, MB_OK);
   end;
 end;
+
 

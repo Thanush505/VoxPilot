@@ -13,6 +13,7 @@ from typing import Optional, List, Dict, Any, Tuple
 import ollama
 
 from backend.agent.tool_registry import ToolRegistry, get_shared_tool_registry
+from backend.automation.application_discovery import get_shared_discovery_service
 
 logger = logging.getLogger(__name__)
 
@@ -26,14 +27,37 @@ MAX_PLAN_STEPS = 10
 
 ACTION_SCHEMAS_DOC: Dict[str, str] = {
     "launch_application": (
-        "Launch an approved application (notepad, calculator, chrome, vscode). "
-        "Parameters: {'application_name': str} (REQUIRED. Example: {'application_name': 'notepad'}). "
+        "Launch any discovered Windows desktop application, Microsoft Store app, Windows Settings page, "
+        "built-in utility, or system folder (e.g. Notepad, Calculator, Chrome, VS Code, WhatsApp, Spotify, "
+        "Discord, Docker Desktop, File Explorer, Downloads, Recycle Bin, Control Panel, Task Manager, Device Manager). "
+        "Parameters: {'application_name': str} (REQUIRED. Example: {'application_name': 'WhatsApp'}). "
         "CRITICAL: Do NOT use 'application' or 'app_name'; you MUST use 'application_name'."
     ),
     "open_application": (
         "Alias for launch_application. "
         "Parameters: {'application_name': str} (REQUIRED. Example: {'application_name': 'notepad'}). "
         "CRITICAL: Do NOT use 'application' or 'app_name'; you MUST use 'application_name'."
+    ),
+    "open_system_utility": (
+        "Open an allowlisted Windows built-in utility (Control Panel, Task Manager, Device Manager, Services). "
+        "Parameters: {'application_name': str} (REQUIRED. Example: {'application_name': 'Control Panel'})."
+    ),
+    "open_windows_settings": (
+        "Open an allowlisted Windows Settings page (Windows Settings, Bluetooth Settings, Wi-Fi Settings, "
+        "Display Settings, Sound Settings, Windows Update, Installed Apps). "
+        "Parameters: {'setting_name': str} (REQUIRED. Example: {'setting_name': 'Bluetooth Settings'})."
+    ),
+    "search_applications": (
+        "Search or list discovered installed applications on this Windows PC. "
+        "Parameters: {'query': Optional[str], 'source': Optional[str], 'limit': Optional[int]}."
+    ),
+    "refresh_applications": (
+        "Refresh the installed application discovery index. "
+        "Parameters: {'include_store_apps': Optional[bool]}."
+    ),
+    "refresh_application_index": (
+        "Alias for refresh_applications. "
+        "Parameters: {'include_store_apps': Optional[bool]}."
     ),
     "find_windows": (
         "Discover open top-level windows for an approved application. "
@@ -145,6 +169,13 @@ class AgentPlanner:
             # Application and window automation
             "launch_application",
             "open_application",
+            "open_system_utility",
+            "open_windows_settings",
+            "open_settings",
+            "search_applications",
+            "list_applications",
+            "refresh_applications",
+            "refresh_application_index",
             "find_windows",
             "manage_window",
             # Keyboard and mouse interaction
@@ -197,6 +228,11 @@ class AgentPlanner:
             "open_application": [
                 "launch_application",
                 "open_application",
+                "open_system_utility",
+                "open_windows_settings",
+                "search_applications",
+                "refresh_applications",
+                "refresh_application_index",
                 "find_windows",
                 "manage_window",
                 "type_text",
@@ -246,6 +282,7 @@ class AgentPlanner:
                 "capture_monitor",
                 "capture_window",
                 "find_windows",
+                "search_applications",
                 "respond",
                 "ask_clarification",
             ],
@@ -274,14 +311,64 @@ class AgentPlanner:
         clean = user_input.strip()
         lower = clean.lower()
 
-        # 1. Direct application launching ("Open Notepad", "Launch Calculator", "Start VS Code")
+        # 0a. Application index refresh ("Refresh application index", "Rescan installed applications")
+        if re.search(
+            r"^(?:refresh|rescan|update|rebuild)\s+(?:the\s+)?(?:installed\s+)?(?:application|app)\s+(?:index|list|cache|catalog)\.?$",
+            lower,
+        ):
+            return {
+                "steps": [
+                    {
+                        "action": "refresh_applications",
+                        "description": "Refresh the Windows application discovery index",
+                        "parameters": {"include_store_apps": True},
+                        "requires_confirmation": False,
+                    }
+                ],
+                "response": "Refreshing the installed application discovery index.",
+            }
+
+        # 0b. Application search / listing ("Show me all installed applications", "List installed apps")
+        search_apps_match = re.search(
+            r"^(?:show|list|search|find|get)\s+(?:me\s+)?(?:all\s+)?(?:installed\s+)?(?:applications|apps|programs)(?:\s+(?:matching|for|named|called)\s+(.+?))?\.?$",
+            clean,
+            re.IGNORECASE,
+        )
+        if search_apps_match:
+            app_filter = (search_apps_match.group(1) or "").strip().strip("'\"")
+            return {
+                "steps": [
+                    {
+                        "action": "search_applications",
+                        "description": (
+                            f"Search installed applications for '{app_filter}'"
+                            if app_filter
+                            else "List discovered installed applications"
+                        ),
+                        "parameters": {"query": app_filter},
+                        "requires_confirmation": False,
+                    }
+                ],
+                "response": (
+                    f"Searching installed applications for '{app_filter}'."
+                    if app_filter
+                    else "Listing discovered installed applications."
+                ),
+            }
+
+        # 1. Direct core application launching ("Open Notepad", "Launch Calculator", "Start VS Code")
         launch_match = re.search(
-            r"^(?:open|launch|start|run)\s+(notepad|calculator|chrome|vs\s*code|vscode)\.?$",
+            r"^(?:open|launch|start|run)\s+(notepad|calculator|chrome|google\s+chrome|vs\s*code|vscode|visual\s+studio\s+code)\.?$",
             lower,
         )
         if launch_match and not ("and type" in lower or "and write" in lower):
-            raw_app = launch_match.group(1).replace(" ", "")
-            app_name = "vscode" if raw_app in ("vscode", "vs code") else raw_app
+            raw_app = launch_match.group(1).strip()
+            if raw_app in ("vscode", "vs code", "visual studio code"):
+                app_name = "vscode"
+            elif raw_app in ("chrome", "google chrome"):
+                app_name = "chrome"
+            else:
+                app_name = raw_app.replace(" ", "")
             return {
                 "steps": [
                     {
@@ -491,6 +578,43 @@ class AgentPlanner:
                 "response": f"Searching for '{query}'.",
             }
 
+        # 10. Universal Application, Windows Settings, System Utility, or Special Folder launching
+        # ("Open WhatsApp", "Open Spotify", "Start Discord", "Open Android Studio", "Launch Docker Desktop",
+        #  "Open MongoDB Compass", "Open Windows Settings", "Open Bluetooth Settings", "Open Control Panel",
+        #  "Open Device Manager", "Open Task Manager", "Open File Explorer", "Open Downloads", "Open Recycle Bin")
+        if intent == "open_application" and not ("and type" in lower or "and write" in lower):
+            universal_open = re.search(r"^(?:open|launch|start|run)\s+(.+?)\.?$", clean, re.IGNORECASE)
+            if universal_open:
+                raw_target = universal_open.group(1).strip().strip("'\"")
+                lower_target = raw_target.lower()
+                is_url = bool(re.search(r"^(?:https?://|www\.)|\.(?:com|org|net|io|gov|edu)\b", lower_target))
+                is_doc_file = bool(
+                    re.search(
+                        r"\.(?:txt|md|pdf|docx?|xlsx?|pptx?|csv|json|xml|yaml|yml|py|js|ts|html|css|log)$",
+                        lower_target,
+                    )
+                )
+                is_my_folder = bool(
+                    re.search(
+                        r"^(?:my\s+(?:files|directory|folder|downloads|documents|desktop)|(?:the\s+)?(?:downloads|documents|desktop)\s+folder)\b",
+                        lower_target,
+                    )
+                )
+                if raw_target and not is_url and not is_doc_file and not is_my_folder and "/" not in raw_target and "\\" not in raw_target:
+                    registry = get_shared_tool_registry()
+                    needs_conf = registry._is_sensitive_application_target(raw_target)
+                    return {
+                        "steps": [
+                            {
+                                "action": "launch_application",
+                                "description": f"Launch application or destination: {raw_target}",
+                                "parameters": {"application_name": raw_target},
+                                "requires_confirmation": needs_conf,
+                            }
+                        ],
+                        "response": f"Opening {raw_target}.",
+                    }
+
         return None
 
     def create_plan(
@@ -534,6 +658,14 @@ class AgentPlanner:
         formatted_schemas = "\n".join(schema_doc_lines)
 
         context_prompt = f"\nPrevious conversation context:\n{context}\n" if context else ""
+        if intent == "open_application":
+            try:
+                disc = get_shared_discovery_service()
+                if disc._loaded:
+                    hints = disc.get_planner_application_hints(max_items=40)
+                    context_prompt += f"\nDiscovered installed applications sample: {hints}\n"
+            except Exception:
+                pass
 
         system_prompt = f"""
 You are the planning module of VoxPilot, a personal AI desktop assistant.

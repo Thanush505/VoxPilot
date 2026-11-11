@@ -15,7 +15,18 @@ from pydantic import BaseModel, ValidationError
 # Import approved executable tool functions and their Pydantic schemas
 from backend.tools.applications import (
     LaunchApplicationInput,
+    OpenWindowsSettingsInput,
+    RefreshApplicationIndexInput,
+    SearchApplicationsInput,
     launch_application_tool,
+    open_windows_settings_tool,
+    refresh_applications_tool,
+    search_applications_tool,
+)
+from backend.automation.application_discovery import (
+    WINDOWS_BUILT_IN_UTILITIES,
+    get_shared_discovery_service,
+    normalize_app_name,
 )
 from backend.tools.windows import (
     FindWindowsInput,
@@ -152,7 +163,26 @@ PARAMETER_ALIASES: Dict[str, Dict[str, str]] = {
         "app_name": "application_name",
         "app": "application_name",
         "name": "application_name",
+        "target": "application_name",
+        "setting_name": "application_name",
+        "setting": "application_name",
+        "utility": "application_name",
     },
+    "open_windows_settings": {
+        "setting": "setting_name",
+        "page": "setting_name",
+        "name": "setting_name",
+        "application_name": "setting_name",
+        "application": "setting_name",
+        "target": "setting_name",
+    },
+    "search_applications": {
+        "search": "query",
+        "filter": "query",
+        "application_name": "query",
+        "name": "query",
+    },
+    "refresh_applications": {},
     "find_windows": {
         "application": "application_name",
         "app_name": "application_name",
@@ -468,7 +498,47 @@ class ToolRegistry:
         if canonical == "download_file" and raw_params.get("confirm_overwrite"):
             return True, "browser_download_overwrite", params
 
+        # 5. Sensitive system configuration utilities require explicit human confirmation
+        if canonical in ("launch_application", "open_windows_settings"):
+            raw_target = str(
+                params.get("application_name")
+                or params.get("setting_name")
+                or params.get("application")
+                or params.get("name")
+                or ""
+            ).strip()
+            if raw_target and self._is_sensitive_application_target(raw_target):
+                return True, "launch_sensitive_application", params
+
         return False, "", {}
+
+    @staticmethod
+    def _is_sensitive_application_target(target: str) -> bool:
+        """Check whether an application/utility target requires explicit user confirmation."""
+        norm = normalize_app_name(target)
+        if not norm:
+            return False
+
+        # Fast check against built-in utilities marked requires_confirmation
+        for spec in WINDOWS_BUILT_IN_UTILITIES.values():
+            if not spec.requires_confirmation:
+                continue
+            candidates = [spec.app_id, spec.display_name, *spec.aliases]
+            for cand in candidates:
+                if normalize_app_name(cand) == norm:
+                    return True
+
+        # Check loaded discovery index if already initialized
+        try:
+            service = get_shared_discovery_service()
+            if service._loaded:
+                res = service.resolve_query(target)
+                if res.get("status") == "resolved" and res["match"].requires_confirmation:
+                    return True
+        except Exception:
+            pass
+
+        return False
 
     def list_tools(self, category: Optional[str] = None) -> List[str]:
         """List registered canonical tool names, optionally filtered by category."""
@@ -491,11 +561,40 @@ class ToolRegistry:
         self.register(ToolDefinition(
             name="launch_application",
             category="applications",
-            description="Launch an approved Windows application (notepad, calculator, chrome, vscode).",
+            description="Launch any discovered Windows desktop application, Microsoft Store app, Windows Settings page, built-in utility, or system folder.",
             func=launch_application_tool,
             input_schema=LaunchApplicationInput,
         ))
         self.register_alias("open_application", "launch_application")
+        self.register_alias("open_system_utility", "launch_application")
+
+        self.register(ToolDefinition(
+            name="open_windows_settings",
+            category="applications",
+            description="Open an allowlisted Windows Settings page (e.g. Bluetooth Settings, Wi-Fi Settings, Display Settings, Sound Settings, Windows Update).",
+            func=open_windows_settings_tool,
+            input_schema=OpenWindowsSettingsInput,
+        ))
+        self.register_alias("open_settings", "open_windows_settings")
+
+        self.register(ToolDefinition(
+            name="search_applications",
+            category="applications",
+            description="Search or list discovered installed Windows applications, Microsoft Store apps, and system utilities.",
+            func=search_applications_tool,
+            input_schema=SearchApplicationsInput,
+        ))
+        self.register_alias("list_applications", "search_applications")
+        self.register_alias("list_installed_applications", "search_applications")
+
+        self.register(ToolDefinition(
+            name="refresh_applications",
+            category="applications",
+            description="Rescan the Windows system and refresh the application discovery index.",
+            func=refresh_applications_tool,
+            input_schema=RefreshApplicationIndexInput,
+        ))
+        self.register_alias("refresh_application_index", "refresh_applications")
 
         self.register(ToolDefinition(
             name="find_windows",
