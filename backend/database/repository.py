@@ -10,7 +10,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
-from sqlmodel import select
+from sqlmodel import SQLModel, select, Session
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from backend.database.models import (
@@ -20,7 +20,6 @@ from backend.database.models import (
     serialize_sanitized_json,
 )
 from backend.database.connection import get_sessionmaker, get_sync_engine
-from sqlmodel import Session
 
 logger = logging.getLogger(__name__)
 

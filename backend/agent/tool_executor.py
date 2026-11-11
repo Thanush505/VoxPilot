@@ -32,6 +32,10 @@ from backend.automation.emergency_stop import (
     get_shared_emergency_stop_manager,
     EmergencyStopActiveError,
 )
+from backend.agent.rate_limiter import (
+    get_shared_rate_limiter,
+    RateLimiter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +70,7 @@ class ToolExecutor:
         action = step.get("action", "")
         raw_params = dict(step.get("parameters", {}))
 
-        # 0. Emergency Stop Check before parameter processing
+        # 0. Checkpoint 1: Emergency Stop Check before any processing
         manager = get_shared_emergency_stop_manager()
         if manager.is_emergency_stop_active():
             logger.warning(
@@ -82,12 +86,37 @@ class ToolExecutor:
                 error=manager.trigger_reason,
             )
 
+        # Checkpoints 2, 3, 4: Execution budget, tool-call budget, tool-specific rate limits
+        execution_id = step.get("execution_id")
+        current_duration = step.get("elapsed_duration")
+        rate_limiter = get_shared_rate_limiter()
+        allowed, budget_reason = rate_limiter.check_tool_budget(
+            execution_id=execution_id,
+            action=action,
+            current_duration=current_duration,
+        )
+        if not allowed:
+            # Count attempt in rate limiter to prevent infinite retry loops
+            rate_limiter.record_tool_call(execution_id, action)
+            logger.warning(
+                f"Step {step_index} ('{action}') rejected by budget/rate limit: {budget_reason}"
+            )
+            return ExecutionResult(
+                step_index=step_index,
+                action=action,
+                success=False,
+                status="rate_limited",
+                message=f"Action '{action}' rejected: {budget_reason}",
+                error=budget_reason,
+            )
+
         # If an override token was provided (e.g. on resume), inject it into parameters
         if override_confirmation_token:
             raw_params["confirmation_token"] = override_confirmation_token
 
-        # 1. Action resolution and parameter schema validation
+        # Checkpoint 5: Parameter schema validation and action resolution
         try:
+            raw_params = self.registry.normalize_parameters(action, raw_params)
             validated_input = self.registry.validate_parameters(action, raw_params)
             tool_def = self.registry.get_tool(action)
         except UnknownToolError as err:
@@ -111,7 +140,7 @@ class ToolExecutor:
                 error=str(err),
             )
 
-        # 2. Trusted Backend Confirmation Policy Check
+        # Checkpoint 6: Trusted Backend Confirmation Policy Check
         # NEVER trust the LLM: LLM-supplied confirmed=True or is_consequential=False CANNOT bypass this!
         requires_conf, action_type, conf_params = self.registry.check_confirmation_required(
             action, raw_params
@@ -198,6 +227,9 @@ class ToolExecutor:
         try:
             # Immediate pre-execution check
             manager.check_emergency_stop()
+
+            # Record call in rate limiter
+            rate_limiter.record_tool_call(execution_id, action)
 
             logger.info(f"Executing step {step_index}: '{action}'")
             tool_result = tool_def.func(validated_input)

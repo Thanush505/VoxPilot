@@ -30,10 +30,11 @@ def _set_sqlite_pragma(dbapi_connection, connection_record) -> None:
         logger.debug(f"SQLite PRAGMA configuration skipped or unsupported: {exc}")
 
 
-# Default persistent database path anchored to project data directory (CWD independent)
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_DATA_DIR = PROJECT_ROOT / "data"
-DEFAULT_DB_FILE = DEFAULT_DATA_DIR / "voxpilot.db"
+# Default persistent database path anchored to unified path resolution
+from backend.paths import get_database_path
+
+DEFAULT_DB_FILE = get_database_path()
+DEFAULT_DATA_DIR = DEFAULT_DB_FILE.parent
 
 _ASYNC_ENGINE: Optional[AsyncEngine] = None
 _SESSION_MAKER: Optional[async_sessionmaker[AsyncSession]] = None

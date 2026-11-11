@@ -12,6 +12,7 @@ from backend.voice.text_to_speech import TextToSpeech
 from backend.voice.wake_word import WakeWordDetector, WakeWordError
 from backend.agent.graph import VoxPilotAgent
 from backend.automation.emergency_stop import get_shared_emergency_stop_manager
+from backend.paths import get_piper_model_path, get_voice_temp_dir, is_frozen
 from typing import Optional
 
 load_dotenv()
@@ -71,8 +72,14 @@ class VoicePipeline:
             language="en"
         )
 
+        resolved_piper = piper_model
+        if resolved_piper is None:
+            resolved_piper = str(get_piper_model_path()) if is_frozen() else "models/piper/en_US-lessac-medium.onnx"
+        elif is_frozen() and resolved_piper == "models/piper/en_US-lessac-medium.onnx":
+            resolved_piper = str(get_piper_model_path())
+
         self.tts = TextToSpeech(
-            model_path=piper_model
+            model_path=resolved_piper
         )
 
         if agent is not None:
@@ -86,14 +93,17 @@ class VoicePipeline:
 
         self.last_agent_result = None
 
-        self.output_directory = Path("models/piper/generated")
+        self.output_directory = get_voice_temp_dir()
         self.output_directory.mkdir(parents=True, exist_ok=True)
 
         self.exit_phrases = [
             "exit voxpilot",
             "stop voxpilot",
             "quit voxpilot",
-            "goodbye voxpilot"
+            "goodbye voxpilot",
+            "stop listening",
+            "exit voice mode",
+            "stop voice mode",
         ]
 
     def start_new_conversation(self) -> str:
@@ -143,12 +153,18 @@ class VoicePipeline:
             return None
         return self.wake_detector.listen_for_wake_word(timeout=timeout)
 
-    def listen(self, duration=5):
+    def listen(self, duration=5, stop_event=None):
         if self.use_streaming_vad:
-            audio = self.recorder.record_until_silence()
+            if stop_event is not None:
+                audio = self.recorder.record_until_silence(stop_event=stop_event)
+            else:
+                audio = self.recorder.record_until_silence()
         else:
             print("\nVoxPilot is listening...")
-            audio = self.recorder.record(duration=duration)
+            if stop_event is not None:
+                audio = self.recorder.record(duration=duration, stop_event=stop_event)
+            else:
+                audio = self.recorder.record(duration=duration)
 
         return audio
 
@@ -233,28 +249,48 @@ class VoicePipeline:
 
         return response
 
-    def speak(self, text):
+    def speak(self, text, cleanup_temp_file=True):
         if not text or not text.strip():
             return
 
         output_path = self.output_directory / "response.wav"
 
         print("\nVoxPilot is speaking...")
+        try:
+            self.tts.text_to_speech(
+                text,
+                str(output_path)
+            )
 
-        self.tts.text_to_speech(
-            text,
-            str(output_path)
-        )
+            audio, sample_rate = sf.read(
+                str(output_path),
+                dtype="float32"
+            )
 
-        audio, sample_rate = sf.read(
-            str(output_path),
-            dtype="float32"
-        )
+            sd.play(audio, sample_rate)
+            sd.wait()
 
-        sd.play(audio, sample_rate)
-        sd.wait()
+            print("Speech playback completed.")
+        finally:
+            if cleanup_temp_file and output_path.exists():
+                try:
+                    output_path.unlink()
+                except Exception:
+                    pass
 
-        print("Speech playback completed.")
+    def stop_speaking(self):
+        """Immediately halt active speaker playback."""
+        try:
+            sd.stop()
+        except Exception:
+            pass
+
+    def stop_listening(self):
+        """Immediately cancel active microphone recording and release stream."""
+        try:
+            self.recorder.cancel()
+        except Exception:
+            pass
 
     def is_exit_command(self, text):
         normalized_text = text.lower().strip()

@@ -54,10 +54,11 @@ def get_default_approved_directories() -> List[Path]:
 
 
 def get_default_project_root() -> Path:
-    """Determine the canonical project root of VoxPilot to protect it from alteration."""
-    # Assuming this file is in backend/automation/file_manager.py:
-    # project root is 3 levels up: file -> automation -> backend -> VoxPilot
-    return Path(__file__).resolve().parent.parent.parent
+    """Determine the canonical project root or executable directory to protect it from alteration."""
+    from backend.paths import is_frozen, get_executable_dir, get_project_root
+    if is_frozen():
+        return get_executable_dir()
+    return get_project_root()
 
 
 # Disallowed system directory roots on Windows
@@ -73,8 +74,9 @@ DISALLOWED_SYSTEM_PATTERNS = [
 
 MAX_SEARCH_DEPTH = 10
 DEFAULT_SEARCH_DEPTH = 5
-MAX_SEARCH_RESULTS = 200
+MAX_SEARCH_RESULTS = 100
 DEFAULT_SEARCH_RESULTS = 50
+MAX_SEARCH_SCANNED_ITEMS = 1000
 
 
 # ==============================================================================
@@ -448,6 +450,7 @@ class FileManager:
 
         matches: List[FileInfo] = []
         base_depth = len(validated_dir.parts)
+        total_scanned = 0
 
         # Skip patterns for directory recursion
         skip_dir_names = {
@@ -469,6 +472,14 @@ class FileManager:
 
                 # Check files in current directory
                 for filename in files:
+                    total_scanned += 1
+                    if total_scanned >= MAX_SEARCH_SCANNED_ITEMS:
+                        logger.warning(
+                            f"File search item limit reached ({total_scanned}/{MAX_SEARCH_SCANNED_ITEMS} items scanned). "
+                            "Terminating search early."
+                        )
+                        return matches
+
                     if len(matches) >= results_limit:
                         return matches
 

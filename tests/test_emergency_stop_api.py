@@ -27,7 +27,9 @@ def setup_environment():
     set_shared_emergency_stop_manager(manager)
     yield manager
     if manager.is_emergency_stop_active():
-        manager.reset_emergency_stop(force=True)
+        for op in manager.list_active_operations():
+            manager.unregister_active_operation(op["operation_id"])
+        manager.reset_emergency_stop()
 
 
 @pytest.fixture
@@ -113,7 +115,7 @@ class TestEmergencyStopApi:
         # State remains active
         assert manager.is_emergency_stop_active() is True
 
-    def test_force_reset_succeeds_with_running_operations(
+    def test_force_reset_rejected_and_operator_recovery_succeeds(
         self, client: TestClient, setup_environment: EmergencyStopManager
     ):
         manager = setup_environment
@@ -125,14 +127,27 @@ class TestEmergencyStopApi:
         )
         manager.trigger_emergency_stop(reason="Force reset test", source="api")
 
-        # Attempt reset with force=True
+        # Attempt reset with force=True -> strictly rejected
         reset_res = client.post(
             "/agent/emergency-stop/reset",
             json={"force": True},
             headers={"Origin": "http://localhost:3000"},
         )
-        assert reset_res.status_code == 200
-        assert reset_res.json()["is_active"] is False
+        assert reset_res.status_code == 409
+        assert "Unrestricted 'force=True' reset has been removed" in reset_res.json()["detail"]
+        assert manager.is_emergency_stop_active() is True
+
+        # Recovery endpoint with valid operator justification succeeds
+        recover_res = client.post(
+            "/agent/emergency-stop/recover",
+            json={
+                "operator_justification": "Operator inspected host and confirmed browser subprocess exited.",
+                "confirmed_terminated_operations": ["stuck_op"],
+            },
+            headers={"Origin": "http://localhost:3000"},
+        )
+        assert recover_res.status_code == 200
+        assert recover_res.json()["is_active"] is False
         assert not manager.is_emergency_stop_active()
 
     def test_csrf_origin_protection_on_emergency_stop_endpoints(self, client: TestClient):

@@ -27,9 +27,11 @@ def reset_shared_manager():
     manager = EmergencyStopManager()
     set_shared_emergency_stop_manager(manager)
     yield manager
-    # Teardown: ensure forced reset if still active
+    # Teardown: ensure clean inactive state
     if manager.is_emergency_stop_active():
-        manager.reset_emergency_stop(force=True)
+        for op in manager.list_active_operations():
+            manager.unregister_active_operation(op["operation_id"])
+        manager.reset_emergency_stop()
 
 
 class TestEmergencyStopManager:
@@ -129,7 +131,7 @@ class TestEmergencyStopManager:
         assert exc_info.value.active_count == 1
         assert manager.is_emergency_stop_active() is True
 
-    def test_force_reset_succeeds_even_with_active_operations(self, reset_shared_manager: EmergencyStopManager):
+    def test_force_reset_disallowed_and_requires_operator_recovery(self, reset_shared_manager: EmergencyStopManager):
         manager = reset_shared_manager
         manager.register_active_operation(
             operation_id="op_hanging",
@@ -139,7 +141,17 @@ class TestEmergencyStopManager:
         )
         manager.trigger_emergency_stop(reason="Forced override test", source="api")
 
-        status = manager.reset_emergency_stop(force=True)
+        # Unrestricted force=True is now disallowed
+        with pytest.raises(UnsafeResetError) as exc_info:
+            manager.reset_emergency_stop(force=True)
+        assert "Unrestricted 'force=True' reset has been removed" in str(exc_info.value)
+        assert manager.is_emergency_stop_active() is True
+
+        # Authorized operator emergency recovery succeeds with evidence and justification
+        status = manager.operator_emergency_recovery(
+            operator_justification="Verified browser process terminated and inputs released safely.",
+            confirmed_terminated_operations=["op_hanging"],
+        )
         assert status["is_active"] is False
         assert not manager.is_emergency_stop_active()
         assert len(manager.list_active_operations()) == 0
@@ -183,7 +195,7 @@ class TestEmergencyStopManager:
     def test_reset_does_not_auto_resume(self, reset_shared_manager: EmergencyStopManager):
         manager = reset_shared_manager
         manager.trigger_emergency_stop(reason="Halt", source="hotkey")
-        manager.reset_emergency_stop(force=True)
+        manager.reset_emergency_stop()
 
         # Confirm manager is simply inactive, nothing is automatically enqueued or running
         assert not manager.is_emergency_stop_active()

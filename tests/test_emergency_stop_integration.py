@@ -38,7 +38,9 @@ def setup_integration_env():
     set_shared_emergency_stop_manager(manager)
     yield manager
     if manager.is_emergency_stop_active():
-        manager.reset_emergency_stop(force=True)
+        for op in manager.list_active_operations():
+            manager.unregister_active_operation(op["operation_id"])
+        manager.reset_emergency_stop()
 
 
 class TestKeyboardControllerEmergencyStop:

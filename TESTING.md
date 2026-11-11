@@ -1074,7 +1074,71 @@ This file documents all verification commands executed, their environments, and 
     - `test_tool_executor_operation_registration_and_cleanup`: Verifies active operation lifecycle.
     - `test_tool_executor_returns_cancelled_when_emergency_stop_triggered_inside_tool`: Returns `status="cancelled"`.
 
-### 2. Full Repository Regression & Live Test Verification
+---
+
+## Test Run: 2026-11-11 — Phase 6 Step 3: Automation Monitoring, Audit Logs & Browser Integration Testing
+
+- **Scope:** Complete frontend dashboard, automation monitoring, audit archive & download, safe API client, Vitest component suite, Playwright browser integration suite, and backend regression.
+- **Environment:** Windows 11, Python 3.12.10 (`.venv`), Node.js v26.11.1, npm 11.20.0, Vite 6.4.6, React 18.3.1, TypeScript 5.7.2, Vitest 5.1.0, Playwright 1.56.0 Chromium.
+
+### 1. Frontend Unit & Component Tests (Vitest)
+- **Command:**
+  ```powershell
+  cd frontend; npm test
+  ```
+- **Result:** PASS (29/29 tests passed in 1.59s)
+- **Test Files:**
+  - `src/tests/agentAndSecurity.test.ts`: 5 passed
+  - `src/tests/apiClient.test.ts`: 12 passed
+  - `src/tests/automationAndAudit.test.ts`: 12 passed
+
+### 2. Frontend Lint & Typecheck
+- **Commands:**
+  ```powershell
+  cd frontend; npm run lint; npm run typecheck
+  ```
+- **Result:** PASS (0 errors, 0 warnings)
+
+### 3. Frontend Production Build
+- **Command:**
+  ```powershell
+  cd frontend; npm run build
+  ```
+- **Result:** PASS (1620 modules transformed; `dist/index.html` 0.49 kB, `dist/assets/index-CjMtuHW4.css` 48.54 kB, `dist/assets/index-D2-u7DV2.js` 251.23 kB in 3.83s)
+
+### 4. Playwright Browser Integration Tests
+- **Command:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest tests/test_frontend_browser.py -v
+  ```
+- **Result:** PASS (8/8 scenarios passed in 7.73s)
+  - `test_01_dashboard_loads`: PASSED (Dashboard title, layout, and header connectivity pill verified)
+  - `test_02_sidebar_navigation_works`: PASSED (Clean page switching across AI Agent, Executions, Confirmations, Automation, and Audit Logs)
+  - `test_03_agent_chat_accepts_and_submits_message`: PASSED (Chat textarea accepts input, sends command, and message bubble renders in thread)
+  - `test_04_execution_history_renders_records`: PASSED (Persistent execution rows render with status badges)
+  - `test_05_confirmation_modal_requires_deliberate_approval`: PASSED (Confirmation center renders; zero token leakage)
+  - `test_06_emergency_stop_ui_reflects_backend_status`: PASSED (Safety latch reflects NORMAL state; STOP button visible)
+  - `test_07_audit_export_download_works_with_fixture`: PASSED (Audit archive table renders fixture and download button functions)
+  - `test_08_backend_unavailable_state_displayed_correctly`: PASSED (Network disconnection triggers clear disconnected pill)
+
+### 5. Backend Regression Tests
+- **Non-Live Test Suite:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest -m "not live"
+  ```
+  *Output:* `569 passed, 3 deselected in 47.62s` (0 failed, 0 errors).
+- **Opt-In Live Test Suite:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest -m "live" -v
+  ```
+  *Output:* `3 passed, 569 deselected in 12.66s` (Notepad launch, Notepad window management, Playwright browser).
+- **Total Combined Tests:** `601 passed, 0 failed` (572 pytest + 29 vitest).
+- **Dependency Integrity:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pip check
+  ```
+  *Output:* `No broken requirements found.`
+
 - **Full Unit & Integration Suite:**
   ```powershell
   .\.venv\Scripts\python.exe -m pytest -m "not live"
@@ -1096,5 +1160,508 @@ This file documents all verification commands executed, their environments, and 
   .\.venv\Scripts\python.exe -m py_compile backend/automation/emergency_stop.py backend/automation/keyboard_controller.py backend/automation/mouse_controller.py backend/automation/browser_controller.py backend/agent/tool_executor.py backend/agent/graph.py backend/api/agent.py backend/main.py backend/voice/voice_pipeline.py tests/test_emergency_stop.py tests/test_emergency_stop_api.py tests/test_agent_cancellation.py tests/test_emergency_stop_integration.py
   ```
   *Output:* Clean compilation, 0 errors.
+
+---
+
+## Test Run: 2026-11-11 — Phase 5, Step 2: Rate Limiting, Safety Checkpoints, and Audit Trail Export Verification
+
+- **Scope:** Phase 5 Step 2: Emergency Stop Reset Correction, Sliding-Window Rate Limiter, 7-Stage Tool Executor Pipeline, LangGraph Safety Checkpoints, Browser/Filesystem Safeguards, and Audit Trail Export Subsystem.
+- **Target:** `backend/automation/emergency_stop.py`, `backend/agent/rate_limiter.py`, `backend/agent/tool_executor.py`, `backend/agent/graph.py`, `backend/agent/state.py`, `backend/automation/browser_controller.py`, `backend/automation/file_manager.py`, `backend/database/audit_export.py`, `backend/api/agent.py`.
+
+### 1. Dedicated Rate Limiting, Budgets, and Audit Export Test Suites
+- **Command:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest tests/test_emergency_stop_reset.py tests/test_rate_limiter.py tests/test_execution_budgets.py tests/test_safety_checkpoints.py tests/test_audit_export.py -v
+  ```
+- **Result:** PASS (38 passed in 5.86s)
+- **Breakdown:**
+  - `tests/test_emergency_stop_reset.py` (9/9 passed):
+    - `test_force_true_reset_is_rejected_with_unsafe_reset_error`: Calling `reset_emergency_stop(force=True)` raises `UnsafeResetError`.
+    - `test_safe_reset_succeeds_when_no_active_operations`: Standard reset succeeds cleanly when active operations count is 0.
+    - `test_safe_reset_rejected_when_active_operations_exist`: Standard reset raises `UnsafeResetError` with active operations.
+    - `test_reset_at_timestamp_updated_on_successful_reset`: Verified `reset_at` property tracking.
+    - `test_operator_recovery_fails_with_insufficient_justification`: Rejects justification shorter than 10 characters with `ValueError`.
+    - `test_operator_recovery_fails_when_unaccounted_operations_remain`: Rejects recovery when operations remain unaccounted for.
+    - `test_operator_recovery_fails_when_pid_is_still_running`: Validates live process PID termination via `psutil`.
+    - `test_operator_recovery_succeeds_with_valid_terminated_pids`: Recovers latch and clears accounted operations with dead PIDs.
+    - `test_reset_and_recovery_strictly_excluded_from_tool_registry`: Verified zero reset or recovery tools exposed to LLM in `ToolRegistry`.
+  - `tests/test_rate_limiter.py` (7/7 passed):
+    - `test_request_rate_limiter_allows_under_limit`: Requests within sliding-window limit succeed.
+    - `test_request_rate_limiter_blocks_over_limit`: Sliding-window exhaustion raises `RateLimitExceededError`.
+    - `test_per_conversation_rate_limiter`: Enforces per-conversation sliding window isolation.
+    - `test_sliding_window_prunes_expired_timestamps`: Timestamp pruning older than 60s verified.
+    - `test_concurrent_execution_slot_acquisition_and_release`: Execution slots bounded to `max_concurrent_executions`.
+    - `test_execution_budget_tracker_duration_and_steps`: Duration and step increments tracked accurately.
+    - `test_tool_call_rate_limits`: Global tool calls per minute and same-tool repeat limits enforced.
+  - `tests/test_execution_budgets.py` (7/7 passed):
+    - `test_tool_calls_per_execution_budget_exceeded`: Stage 3 tool call budget halts execution with `status="rate_limited"`.
+    - `test_same_tool_call_budget_exceeded`: Stage 4 same-tool repetition limit halts execution with `status="rate_limited"`.
+    - `test_execution_duration_budget_exceeded`: Stage 2 duration budget check halts execution with `status="rate_limited"`.
+    - `test_tool_executor_evaluation_pipeline_order`: Verified strict 7-stage order (emergency stop -> duration -> tool budget -> rate limit -> schema -> confirmation -> execution).
+    - `test_browser_navigation_budget_enforced`: BrowserController enforces $\le 5$ navigations per session.
+    - `test_browser_download_budget_enforced`: BrowserController enforces $\le 3$ downloads per session.
+    - `test_file_search_result_and_scanned_item_bounds`: FileManager enforces `MAX_SEARCH_RESULTS = 100` and `MAX_SEARCH_SCANNED_ITEMS = 1000`.
+  - `tests/test_safety_checkpoints.py` (5/5 passed):
+    - `test_process_request_rate_limited_returns_rate_limited_status`: LangGraph rejects incoming request if sliding window is exhausted.
+    - `test_plan_step_count_exceeding_budget_halts_workflow`: LangGraph plan validation halts if steps exceed `max_steps`.
+    - `test_mid_execution_duration_budget_halts_and_preserves_completed_steps`: Duration budget exhaustion halts execution, preserves Step 1 in `completed_steps`, and produces truthful response.
+    - `test_tool_call_budget_halts_and_preserves_completed_steps`: Tool call budget exhaustion halts execution cleanly without re-planning loops.
+    - `test_rate_limited_execution_returns_http_429`: FastAPI `/agent/execute` endpoint returns HTTP 429 when execution status is `"rate_limited"`.
+  - `tests/test_audit_export.py` (10/10 passed):
+    - `test_sensitive_data_scrubber_redacts_credentials`: Scrubs tokens, passwords, keys, and secrets with `"[REDACTED]"`.
+    - `test_audit_export_json_structure`: Exports execution records and steps to valid JSON with metadata.
+    - `test_audit_export_csv_structure`: Exports execution records and steps to valid flattened CSV.
+    - `test_audit_export_directory_containment_prevents_traversal`: Path traversal attempts outside `data/exports` raise `ValueError`.
+    - `test_audit_export_overwrite_protection`: Overwrite requires explicit `confirm_overwrite=True`.
+    - `test_audit_export_date_and_status_filtering`: Supports filtering exports by date range and execution status.
+    - `test_audit_export_api_endpoints`: REST `POST /agent/audit/export` and `GET /agent/audit/exports/{export_id}/status` return 200 OK.
+    - `test_audit_export_api_csrf_origin_protection`: Untrusted Origin headers rejected with HTTP 403 Forbidden.
+    - `test_audit_export_strictly_excluded_from_tool_registry`: Verified zero audit export tools in `ToolRegistry`.
+    - `test_exported_files_are_never_executed_or_opened`: Verifies export routines never trigger subprocess or OS execution.
+
+---
+
+## Test Run: 2026-11-11 — Phase 6 Step 3: Automation Monitoring, Audit Logs & Browser Integration Testing
+
+- **Scope:** Complete frontend dashboard, automation monitoring, audit archive & download, safe API client, Vitest component suite, Playwright browser integration suite, and backend regression.
+- **Environment:** Windows 11, Python 3.12.10 (`.venv`), Node.js v26.11.1, npm 11.20.0, Vite 6.4.6, React 18.3.1, TypeScript 5.7.2, Vitest 5.1.0, Playwright 1.56.0 Chromium.
+
+### 1. Frontend Unit & Component Tests (Vitest)
+- **Command:**
+  ```powershell
+  cd frontend; npm test
+  ```
+- **Result:** PASS (29/29 tests passed in 1.59s)
+- **Test Files:**
+  - `src/tests/agentAndSecurity.test.ts`: 5 passed
+  - `src/tests/apiClient.test.ts`: 12 passed
+  - `src/tests/automationAndAudit.test.ts`: 12 passed
+
+### 2. Frontend Lint & Typecheck
+- **Commands:**
+  ```powershell
+  cd frontend; npm run lint; npm run typecheck
+  ```
+- **Result:** PASS (0 errors, 0 warnings)
+
+### 3. Frontend Production Build
+- **Command:**
+  ```powershell
+  cd frontend; npm run build
+  ```
+- **Result:** PASS (1620 modules transformed; `dist/index.html` 0.49 kB, `dist/assets/index-CjMtuHW4.css` 48.54 kB, `dist/assets/index-D2-u7DV2.js` 251.23 kB in 3.83s)
+
+### 4. Playwright Browser Integration Tests
+- **Command:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest tests/test_frontend_browser.py -v
+  ```
+- **Result:** PASS (8/8 scenarios passed in 7.73s)
+  - `test_01_dashboard_loads`: PASSED (Dashboard title, layout, and header connectivity pill verified)
+  - `test_02_sidebar_navigation_works`: PASSED (Clean page switching across AI Agent, Executions, Confirmations, Automation, and Audit Logs)
+  - `test_03_agent_chat_accepts_and_submits_message`: PASSED (Chat textarea accepts input, sends command, and message bubble renders in thread)
+  - `test_04_execution_history_renders_records`: PASSED (Persistent execution rows render with status badges)
+  - `test_05_confirmation_modal_requires_deliberate_approval`: PASSED (Confirmation center renders; zero token leakage)
+  - `test_06_emergency_stop_ui_reflects_backend_status`: PASSED (Safety latch reflects NORMAL state; STOP button visible)
+  - `test_07_audit_export_download_works_with_fixture`: PASSED (Audit archive table renders fixture and download button functions)
+  - `test_08_backend_unavailable_state_displayed_correctly`: PASSED (Network disconnection triggers clear disconnected pill)
+
+### 5. Backend Regression Tests
+- **Non-Live Test Suite:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest -m "not live"
+  ```
+  *Output:* `569 passed, 3 deselected in 47.62s` (0 failed, 0 errors).
+- **Opt-In Live Test Suite:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest -m "live" -v
+  ```
+  *Output:* `3 passed, 569 deselected in 12.66s` (Notepad launch, Notepad window management, Playwright browser).
+- **Total Combined Tests:** `601 passed, 0 failed` (572 pytest + 29 vitest).
+- **Dependency Integrity:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pip check
+  ```
+  *Output:* `No broken requirements found.`
+
+---
+
+## Test Run: 2026-11-11 — Phase 7, Step 1 Full-System Integration & Security Audit
+
+- **Scope:** Phase 7 Step 1 Full-System Integration Testing, Security Verification, and Test Suite Reconciliation
+- **Target:** Full repository (React 18 frontend, FastAPI backend, LangGraph agent, Win32/Playwright automation, Faster-Whisper/Piper voice pipeline, SQLite persistence)
+
+### 1. Frontend Unit & Component Tests (Vitest)
+- **Command:**
+  ```powershell
+  cd frontend; npm test
+  ```
+- **Result:** PASS (29/29 tests passed in 1.57s)
+- **Test Files:**
+  - `src/tests/agentAndSecurity.test.ts`: 5 passed
+  - `src/tests/apiClient.test.ts`: 12 passed
+  - `src/tests/automationAndAudit.test.ts`: 12 passed
+
+### 2. Frontend Lint, Typecheck, and Production Build
+- **Commands:**
+  ```powershell
+  cd frontend; npm run lint; npm run typecheck; npm run build
+  ```
+- **Result:** PASS (0 lint errors, 0 type errors)
+- **Build Output:**
+  ```
+  vite v6.4.6 building for production...
+  transforming...
+  ✓ 1620 modules transformed.
+  rendering chunks...
+  computing gzip size...
+  dist/index.html                   0.49 kB │ gzip:  0.32 kB
+  dist/assets/index-CjMtuHW4.css   48.54 kB │ gzip:  7.48 kB
+  dist/assets/index-D2-u7DV2.js   251.23 kB │ gzip: 71.36 kB
+  ✓ built in 4.26s
+  ```
+
+### 3. Playwright Headless Browser Integration Tests
+- **Command:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest tests/test_frontend_browser.py -v
+  ```
+- **Result:** PASS (8/8 passed in 7.86s)
+- **Detailed Results:**
+  - `test_01_dashboard_loads`: PASSED [12%]
+  - `test_02_sidebar_navigation_works`: PASSED [25%]
+  - `test_03_agent_chat_accepts_and_submits_message`: PASSED [37%]
+  - `test_04_execution_history_renders_records`: PASSED [50%]
+  - `test_05_confirmation_modal_requires_deliberate_approval`: PASSED [62%]
+  - `test_06_emergency_stop_ui_reflects_backend_status`: PASSED [75%]
+  - `test_07_audit_export_download_works_with_fixture`: PASSED [87%]
+  - `test_08_backend_unavailable_state_displayed_correctly`: PASSED [100%]
+
+### 4. Full Pytest Non-Live Test Suite (Backend + Browser Integration)
+- **Command:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest -m "not live"
+  ```
+- **Result:** PASS (569 passed, 3 deselected in 36.94s)
+- **Taxonomy Breakdown:**
+  - Backend unit & integration tests: 561 tests
+  - Playwright browser integration tests: 8 tests
+  - Total non-live tests: 569 tests
+
+### 5. Opt-In Live Desktop & Browser Verification Suite
+- **Command:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest -m "live" -v
+  ```
+- **Result:** PASS (3 passed, 569 deselected in 9.72s)
+- **Detailed Results:**
+  - `tests/test_application_launcher.py::test_live_launch_and_cleanup_notepad`: PASSED [33%]
+  - `tests/test_browser_controller.py::test_live_browser_automation`: PASSED [66%]
+  - `tests/test_window_manager.py::test_live_notepad_window_management`: PASSED [100%]
+
+### 6. Dependency Integrity Check
+- **Command:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pip check
+  ```
+- **Result:** PASS
+- **Output:** `No broken requirements found.`
+
+### 7. Total Reconciled Test Inventory
+- Pytest non-live tests: 569
+- Pytest live tests: 3
+- Vitest frontend tests: 29
+- **Grand Total Unique Automated Tests:** 601 tests (601 passed, 0 failed)
+
+---
+
+## Test Run: 2026-11-11 — Phase 7, Step 2 Standalone Windows Packaging & Distribution Verification
+
+- **Scope:** Phase 7 Step 2 Standalone Windows Distribution (PyInstaller One-Folder Distribution, Runtime Path Resolution, Single-Port Hosting, Dependency Diagnostics, and Relocation Testing)
+- **Target:** `dist/VoxPilot/VoxPilot.exe`, `backend/paths.py`, `launcher.py`, `VoxPilot.spec`, `tests/test_paths.py`, `scripts/verify_distribution.py`
+
+### 1. Runtime Path Resolution Unit Tests
+- **Command:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest tests/test_paths.py -v
+  ```
+- **Result:** PASS (16/16 passed in 0.60s)
+- **Coverage:**
+  - `test_is_frozen_in_normal_python`: Development mode detection.
+  - `test_is_frozen_when_sys_meipass_present`: Frozen runtime bundle detection.
+  - `test_get_bundle_dir_in_normal_python`: Repository root resolution.
+  - `test_get_bundle_dir_when_frozen`: PyInstaller extraction directory resolution (`sys._MEIPASS`).
+  - `test_get_user_data_dir_default_windows`: `%LOCALAPPDATA%\VoxPilot` resolution.
+  - `test_get_user_data_dir_override`: `VOXPILOT_DATA_DIR` environment override.
+  - `test_get_database_path_default_and_override`: Database path resolution & env override.
+  - `test_get_log_dir_default_and_override`: Log path resolution & env override.
+  - `test_get_export_dir_default_and_override`: Export directory resolution & env override.
+  - `test_get_config_dir_default_and_override`: Config directory resolution & env override.
+  - `test_get_voice_temp_dir_default_and_override`: Voice audio scratch directory resolution & env override.
+  - `test_get_frontend_dist_dir_dev_and_frozen`: React dist resolution in dev vs frozen.
+  - `test_get_piper_model_path_dev_and_frozen`: Piper ONNX model resolution in dev vs frozen.
+  - `test_ensure_user_directories`: Automatic provisioning of user data subdirectories.
+
+### 2. Frontend Production Compilation
+- **Command:**
+  ```powershell
+  cd frontend; npm run lint; npm run typecheck; npm run build
+  ```
+- **Result:** PASS (0 lint errors, 0 typecheck errors)
+- **Build Output:**
+  ```
+  vite v6.4.6 building for production...
+  transforming...
+  ✓ 1620 modules transformed.
+  rendering chunks...
+  computing gzip size...
+  dist/index.html                   0.49 kB │ gzip:  0.32 kB
+  dist/assets/index-CjMtuHW4.css   48.54 kB │ gzip:  7.48 kB
+  dist/assets/index-D2-u7DV2.js   251.23 kB │ gzip: 71.36 kB
+  ✓ built in 3.48s
+  ```
+
+### 3. Standalone Distribution Packaging (PyInstaller)
+- **Command:**
+  ```powershell
+  .\.venv\Scripts\pyinstaller.exe VoxPilot.spec --noconfirm
+  ```
+- **Result:** PASS (Exit code 0; generated `dist/VoxPilot/`)
+- **Package Inventory:**
+  - `dist/VoxPilot/VoxPilot.exe`: 31,689,356 bytes (~31.6 MB)
+  - `dist/VoxPilot/_internal/`: Runtime shared libraries, bundled dependencies, ONNX model (`_internal/models/piper/en_US-lessac-medium.onnx`), and React frontend (`_internal/frontend/dist/`)
+  - `dist/VoxPilot/README.txt`: 2,216 bytes quickstart instructions
+
+### 4. Standalone Executable In-Place & Relocation Verification
+- **Command:**
+  ```powershell
+  .\.venv\Scripts\python.exe scripts\verify_distribution.py
+  ```
+- **Result:** PASS (All tests passed)
+- **Detailed Results:**
+  - **In-Place Execution (`dist/VoxPilot/VoxPilot.exe` on port 8001):**
+    - `GET /health`: `{"status":"healthy","service":"VoxPilot","version":"0.5.0"}`
+    - `GET /` (JSON): `{"app":"VoxPilot Agent API","version":"0.5.0","status":"online"}`
+    - `GET /` (HTML): Status 200, length 483, contains `<div id="root"></div>`
+    - `GET /agent/emergency-stop/status`: `{"is_active":false,...}`
+    - `GET /agent/tools`: 37 registered tools enumerated
+    - `GET /agent/conversations`: Database session query executed successfully
+  - **User Data Isolation Check:**
+    - `%LOCALAPPDATA%\VoxPilot\data\voxpilot.db`: Exists (4,096 bytes)
+    - `%LOCALAPPDATA%\VoxPilot\logs\voxpilot.log`: Exists (5,150 bytes)
+  - **Relocated Execution (`%TEMP%\VoxPilot_Relocated_Test` on port 8002):**
+    - Full distribution folder copied outside repository tree
+    - Launched `VoxPilot.exe` on port 8002 with `VOXPILOT_AUTO_OPEN_BROWSER=0`
+    - All endpoints (`/health`, `/` HTML/JSON, `/agent/emergency-stop/status`, `/agent/tools`, `/agent/conversations`) responded with status 200
+    - Clean process shutdown and temporary folder cleanup
+
+### 5. Full Backend Pytest Regression Test Suite
+- **Command:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest -m "not live"
+  ```
+- **Result:** PASS (585 passed, 3 deselected in 34.67s)
+- **Inventory:** 577 backend unit & integration tests + 8 Playwright browser integration tests. 0 failed, 0 errors.
+
+### 6. Opt-In Live Desktop & Browser Verification Suite
+- **Command:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest -m "live" -v
+  ```
+- **Result:** PASS (3 passed, 585 deselected in 9.63s)
+  - `test_live_launch_and_cleanup_notepad`: PASSED
+  - `test_live_browser_automation`: PASSED
+  - `test_live_notepad_window_management`: PASSED
+
+### 7. Frontend Vitest Test Suite
+- **Command:**
+  ```powershell
+  cd frontend; npm test
+  ```
+- **Result:** PASS (29/29 passed in 1.48s)
+
+### 8. Python Dependency Integrity
+- **Command:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pip check
+  ```
+- **Result:** PASS (`No broken requirements found.`)
+
+---
+
+## Test Run: 2026-11-11 — Phase 7 Step 3: Windows Installer Compilation & E2E Verification
+
+- **Scope:** Phase 7 Step 3 Windows Installer & First-Run Validation
+- **Target:** `installer/VoxPilot.iss`, `installer/Output/VoxPilot-Setup.exe`, `scripts/verify_installer.py`
+
+### 1. Inno Setup Compiler Compilation
+- **Command:**
+  ```powershell
+  & "C:\Users\Thanu\AppData\Local\Programs\Inno Setup 6\ISCC.exe" installer\VoxPilot.iss
+  ```
+- **Result:** PASS (Exit code 0)
+- **Compiler Version:** Inno Setup 6.7.3 Command-Line Compiler
+- **Compression:** LZMA2/ultra64 solid compression
+- **Output Executable:** `installer\Output\VoxPilot-Setup.exe`
+- **File Size:** 230,734,929 bytes (~220.05 MB)
+- **SHA-256 Checksum:** `A47B5220D7C4BE15983FDBDF34E2177C47640C6964AA9FAFA29D9B0367B5CF57`
+
+### 2. End-to-End Installer Lifecycle Test Suite
+- **Command:**
+  ```powershell
+  .\.venv\Scripts\python.exe scripts\verify_installer.py
+  ```
+- **Result:** PASS (All 8 lifecycle checks passed 100%)
+- **Detailed Execution Breakdown:**
+  1. **Installer Binary Check:** `installer\Output\VoxPilot-Setup.exe` verified present and accessible (220.05 MB).
+  2. **Silent Custom Installation:** Executed `VoxPilot-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /SP- /NORESTART /DIR="C:\Users\Thanu\AppData\Local\Temp\VoxPilot Custom Test Install"`. Exited cleanly with return code 0.
+  3. **Installed Artifact Verification:**
+     - `VoxPilot.exe`: Verified present
+     - `install_browser.bat`: Verified present
+     - `README.txt`: Verified present
+     - `unins000.exe`: Verified present
+     - `_internal\`: Verified present
+  4. **Start Menu Shortcut Verification:**
+     - `VoxPilot.lnk`: Verified in `AppData\Roaming\Microsoft\Windows\Start Menu\Programs\VoxPilot`
+     - `Install Playwright Browser.lnk`: Verified present
+     - `Uninstall VoxPilot.lnk`: Verified present
+  5. **Installed Executable Live Runtime Test (Port 8003):**
+     - Launched `VoxPilot.exe` from custom install path with `VOXPILOT_PORT=8003` and `VOXPILOT_AUTO_OPEN_BROWSER=0`.
+     - `GET http://127.0.0.1:8003/health`: Status 200 `{'status': 'healthy', 'service': 'VoxPilot', 'version': '0.5.0'}`.
+     - `GET http://127.0.0.1:8003/` (JSON): Status 200 `{'app': 'VoxPilot Agent API', 'version': '0.5.0', 'status': 'online'}`.
+     - `GET http://127.0.0.1:8003/` (HTML): Status 200, length 483 bytes, contains `<div id="root"></div>`.
+     - `GET http://127.0.0.1:8003/agent/emergency-stop/status`: Status 200, `is_active: false`.
+     - `GET http://127.0.0.1:8003/agent/tools`: Status 200, 37 canonical tools returned.
+     - `GET http://127.0.0.1:8003/agent/conversations`: Status 200, SQLite database query successful.
+     - Graceful process termination verified.
+  6. **User Data Isolation Verification:**
+     - Confirmed database created at `%LOCALAPPDATA%\VoxPilot\data\voxpilot.db` (4,096 bytes).
+     - Confirmed log file created at `%LOCALAPPDATA%\VoxPilot\logs\voxpilot.log` (11,831 bytes).
+  7. **Upgrade Persistence Test:**
+     - Re-ran `VoxPilot-Setup.exe` silently over existing test install.
+     - Verified installation completed cleanly and `%LOCALAPPDATA%\VoxPilot\data\voxpilot.db` was untouched and preserved.
+  8. **Silent Uninstallation & Data Retention Invariant:**
+     - Executed `unins000.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`.
+     - Application directory and Start Menu shortcuts completely removed.
+     - **CRITICAL SAFETY INVARIANT PRESERVED:** `%LOCALAPPDATA%\VoxPilot\data\voxpilot.db` (4,096 bytes) and logs strictly preserved on disk.
+
+### 3. Full Backend Pytest Regression Test Suite
+- **Command:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest -m "not live"
+  ```
+- **Result:** PASS (585 passed, 3 deselected in 37.73s)
+- **Inventory:** 577 backend unit & integration tests + 8 Playwright browser integration tests. 0 failed, 0 errors.
+
+### 4. Opt-In Live Desktop & Browser Verification Suite
+- **Command:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest -m "live" -v
+  ```
+- **Result:** PASS (3 passed, 585 deselected in 9.20s)
+  - `test_live_launch_and_cleanup_notepad`: PASSED
+  - `test_live_browser_automation`: PASSED
+  - `test_live_notepad_window_management`: PASSED
+
+### 5. Frontend Vitest Test Suite
+- **Command:**
+  ```powershell
+  cd frontend; npm test
+  ```
+- **Result:** PASS (29/29 passed in 1.47s across 3 test suites)
+
+### 6. Frontend Build, Lint, and Typecheck
+- **Commands:**
+  ```powershell
+  cd frontend; npm run lint; npm run typecheck; npm run build
+  ```
+- **Result:** PASS (0 ESLint errors, 0 TypeScript errors; production bundle built in 4.47s)
+
+### 7. Python Dependency Integrity
+- **Command:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pip check
+  ```
+- **Result:** PASS (`No broken requirements found.`)
+
+### 8. Total Reconciled Project Test Inventory
+- Pytest non-live tests: 585
+- Pytest live tests: 3
+- Vitest frontend tests: 29
+- Standalone distribution & relocation suite: 1 (passes all validation checks)
+- Inno Setup installer lifecycle E2E suite: 1 (passes all 8 validation checks)
+- **Grand Total Unique Automated Tests:** 617 tests (617 passed, 0 failed) + 2 live verification scripts.
+
+---
+
+## Test Run: 2026-11-11 — Voice Mode Integration, Global Keyboard Shortcut, & Rebuilt Distribution Verification
+
+- **Scope:** Voice Mode UI Integration, Customizable Global Shortcut (`Ctrl+Shift+V`), `SettingsPage`, Agent Planner Fixes, Standalone Exe & Installer Rebuild
+- **Target:** `tests/test_voice_mode_and_shortcut.py`, `tests/test_planner_bugfixes.py`, `frontend/src/tests/voiceAndSettings.test.ts`, `dist/VoxPilot/VoxPilot.exe`, `installer/Output/VoxPilot-Setup.exe`
+
+### 1. Backend Non-Live Pytest Suite
+- **Command:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest -m "not live"
+  ```
+- **Result:** PASS (637 passed, 3 deselected in 30.84s)
+
+### 2. Backend Opt-In Live Pytest Suite
+- **Command:**
+  ```powershell
+  .\.venv\Scripts\python.exe -m pytest -m "live" -v
+  ```
+- **Result:** PASS (3 passed, 637 deselected in 11.77s)
+
+### 3. Frontend ESLint, Vitest, and Production Build
+- **Commands:**
+  ```powershell
+  npm --prefix frontend run lint
+  npm --prefix frontend test
+  npm --prefix frontend run build
+  ```
+- **Result:** PASS
+  - ESLint: 0 errors, 0 warnings
+  - Vitest: 35 passed across 4 test files in 1.47s
+  - Build: Production bundle built in 3.68s (`dist/assets/index-Bd8mLTSM.css` 53.95 kB, `dist/assets/index-LhVy5szg.js` 277.00 kB)
+
+### 4. Standalone Distribution & Relocation Verification (`scripts/verify_distribution.py`)
+- **Command:**
+  ```powershell
+  .\.venv\Scripts\python.exe scripts\verify_distribution.py
+  ```
+- **Result:** PASS (In-place port 8001 + relocated `%TEMP%\VoxPilot_Relocated_Test` port 8002 passed 100%, including `/agent/voice/status` returning `{'phase': 'idle', 'shortcut': 'Ctrl+Shift+V', 'shortcut_registered': True}`)
+
+### 5. Rebuilt Inno Setup Windows Installer (`installer\Output\VoxPilot-Setup.exe`)
+- **Command:**
+  ```powershell
+  & "C:\Users\Thanu\AppData\Local\Programs\Inno Setup 6\ISCC.exe" installer\VoxPilot.iss
+  ```
+- **Result:** PASS (Exit code 0 in 308.671s)
+- **File Size:** 230,792,262 bytes (~220.10 MB)
+- **SHA-256 Checksum:** `82E3358735672ECDEF5104AC2951FDD6DB91E6428BDA33A96BBD3F5CA0B6F666`
+- **Grand Total Automated Tests:** **675 passed, 0 failed** (637 non-live pytest + 3 live pytest + 35 frontend Vitest).
+
+---
+
+## Test Run: 2026-11-11 — In-App Software Update System (Phase 1) & Rebuilt Distribution Verification
+
+- **Scope:** Centralized Version Authority (`VERSION`, `backend/version.py`), GitHub Release Update Service (`backend/updater/update_service.py`), External Windows Updater Runner (`backend/updater/updater_runner.py`), FastAPI Update Endpoints (`backend/api/updates.py`), Frontend Update Banner & Settings UI (`UpdateNotificationBanner.tsx`, `SettingsPage.tsx`), Standalone `VoxPilot.exe`, and Inno Setup `VoxPilot-Setup.exe`
+- **Commands & Results:**
+  - `.\.venv\Scripts\pytest.exe tests/test_update_system.py -v`: **39 passed** in 14.27s
+  - `.\.venv\Scripts\pytest.exe -m "not live" -q`: **677 passed**, 3 deselected in 38.32s
+  - `.\.venv\Scripts\pytest.exe -m "live" -q`: **3 passed**, 677 deselected in 15.72s
+  - `npm --prefix frontend test`: **44 passed** across 5 test files (`updateSystem.test.ts`: 9 passed) in 1.46s
+  - `npm --prefix frontend run lint`: **0 errors, 0 warnings**
+  - `npm --prefix frontend run typecheck`: **0 errors**
+  - `npm --prefix frontend run build`: **PASS** (`dist/assets/index-Dk0ol29s.css` 57.70 kB, `dist/assets/index-DgfCa3aM.js` 300.11 kB)
+  - `.\.venv\Scripts\python.exe scripts\verify_distribution.py`: **PASS** (in-place port 8001 + relocated `%TEMP%\VoxPilot_Relocated_Test` port 8002, including `/api/version` & `/api/updates/status`)
+  - `dist\VoxPilot\VoxPilot.exe`: **31,857,586 bytes** (SHA-256: `E6DF5681D895E861A02AEC0075D3CAAC7AFE91D1179263E851C17E8A9F2F53AC`)
+  - `installer\Output\VoxPilot-Setup.exe`: **233,384,613 bytes** (SHA-256: `17D7B0C40E3B3542C709B5A0DCF24B083841DC9E56852C85FB185BC9B9AAD79B`)
+  - **Grand Total Automated Tests:** **724 passed, 0 failed** (677 non-live pytest + 3 live pytest + 44 frontend Vitest).
+
+
+
+
 
 

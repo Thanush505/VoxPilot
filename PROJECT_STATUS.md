@@ -1,6 +1,6 @@
 # VoxPilot — Project Status
 
-**Current Development Phase:** Phase 5 — Agent Intelligence and Safety (Step 5.1: Global Emergency Stop Complete)  
+**Current Development Phase:** Phase 7 — Testing, Packaging, and Installer (Step 7.3: Windows Installer and First-Run Distribution Validation Complete)  
 **Last Updated:** 2026-11-11  
 
 ---
@@ -13,9 +13,9 @@
 | **Phase 2** | **Voice Interface (Whisper STT + Piper TTS)** | **Completed** |
 | **Phase 3** | **Desktop Automation (Windows UI, Apps, Files, Browser)** | **Completed** |
 | **Phase 4** | **AI Agent Integration (LangGraph + Ollama)** | **Completed** |
-| **Phase 5** | **Agent Intelligence and Safety (Guardrails, Approvals, Emergency Stop)** | **In Progress (Step 5.1 Completed)** |
-| Phase 6 | Frontend Dashboard (React + Vite) | Not Started |
-| Phase 7 | Testing and Packaging (End-to-End, PyInstaller) | Not Started |
+| **Phase 5** | **Agent Intelligence and Safety (Guardrails, Approvals, Emergency Stop, Rate Limiting, Budgets, Audit Trail)** | **Completed** |
+| **Phase 6** | **Frontend Dashboard (React + Vite)** | **Completed (Steps 6.1, 6.2, and 6.3 Completed)** |
+| **Phase 7** | **Testing, Packaging, and Installer (Step 7.1 Full Audit, Step 7.2 Standalone Packaging, Step 7.3 Windows Installer)** | **Completed** |
 
 ---
 
@@ -174,46 +174,261 @@
     - [`tests/test_emergency_stop_api.py`](./tests/test_emergency_stop_api.py) (7 tests): REST API endpoints, CSRF origin verification, HTTP 409 rejection, tool registry omission.
     - [`tests/test_agent_cancellation.py`](./tests/test_agent_cancellation.py) (5 tests): Pre-execution rejection, resumption rejection, mid-workflow step halts, dynamic replanning prevention, voice pipeline safeguards.
     - [`tests/test_emergency_stop_integration.py`](./tests/test_emergency_stop_integration.py) (12 tests): Keyboard modifier release, mouse button release, browser session cleanup callbacks, and ToolExecutor cancellation lifecycle.
+- [x] Phase 5, Step 2: Rate Limiting, Safety Checkpoints, and Audit Trail Export in [`backend/agent/`](./backend/agent/), [`backend/automation/`](./backend/automation/), and [`backend/database/`](./backend/database/):
+  - Emergency Stop Safe Reset & Operator Recovery:
+    - Removed unrestricted `force=True` reset from normal operation in `backend/automation/emergency_stop.py`.
+    - Standard `reset_emergency_stop()` requires that all tracked operations have cleanly terminated and unregistered (`len(_active_operations) == 0`); raises `UnsafeResetError` (HTTP 409) if operations are running.
+    - Implemented documented `operator_emergency_recovery()`: requires detailed operator justification ($\ge 10$ chars), explicit enumeration of all confirmed terminated operations, and verifies process PID termination via `psutil`. Never clears records merely due to elapsed time; never auto-resumes interrupted executions.
+    - Endpoints: `POST /agent/emergency-stop/reset` and `POST /agent/emergency-stop/recover` protected by localhost and CSRF Origin checks.
+  - In-Process Sliding-Window Rate Limiter & Resource Budgets ([`backend/agent/rate_limiter.py`](./backend/agent/rate_limiter.py)):
+    - Configurable defaults and environment variable overrides: requests/min (20), concurrent active executions (2), conversation requests/min (10), tool calls/execution (15), global tool calls/min (60), same-tool repetition/execution (5), plan step budget (10), execution duration budget (120s), browser navigations budget (5), downloads budget (3).
+    - Thread-safe sliding-window implementation pruning expired timestamps older than 60s.
+    - Admitted and rejected attempts recorded to prevent infinite retry loops.
+  - Tool Executor Strict Safety Evaluation Order ([`backend/agent/tool_executor.py`](./backend/agent/tool_executor.py)):
+    - Enforced 7-stage evaluation pipeline: (1) Emergency stop, (2) Execution duration budget, (3) Tool-call budget, (4) Tool-specific rate limits, (5) Parameter validation, (6) Confirmation requirements, (7) Tool execution under active operation tracking.
+    - Exceeded limits return structured `ExecutionResult(status="rate_limited", success=False)`.
+  - LangGraph Safety Checkpoints ([`backend/agent/graph.py`](./backend/agent/graph.py) & [`backend/agent/state.py`](./backend/agent/state.py)):
+    - Pre-dispatch request rate limiting and concurrent slot acquisition/release in `process_request`.
+    - Plan step count safety validation against `rate_limiter.config.max_steps`.
+    - Mid-execution duration budget check in `execute_tool`.
+    - Immediate execution halt upon receiving `rate_limited` status in `evaluate_result`, preserving completed steps without dynamic re-planning.
+    - Duration budget check in `_should_replan` preventing re-planning after duration exhaustion.
+    - Pre-resumption duration and slot check in `resume_execution`.
+  - Browser & Filesystem Safeguards:
+    - `BrowserController`: Enforced navigation count limit ($\le 5$) and download limit ($\le 3$) per session with automatic session counter resets.
+    - `FileManager`: Enforced `MAX_SEARCH_RESULTS = 100` and `MAX_SEARCH_SCANNED_ITEMS = 1000` to prevent unbounded filesystem traversals.
+  - Audit Trail Export Subsystem ([`backend/database/audit_export.py`](./backend/database/audit_export.py) & [`backend/api/agent.py`](./backend/api/agent.py)):
+    - `AuditExporter`: Queries persistent SQLite `ExecutionRecord` and `ExecutionStepRecord`.
+    - Formats: Structured JSON and flattened CSV.
+    - Sensitive data scrubber: recursively redacts tokens, passwords, keys, and credentials with `"[REDACTED]"`.
+    - Approved destination containment: outputs strictly confined to `data/exports`, preventing path traversal.
+    - Overwrite confirmation: requires `confirm_overwrite=True` if target file exists.
+    - Exported files are never opened or executed.
+    - REST API: `POST /agent/audit/export` and `GET /agent/audit/exports/{export_id}/status`.
+    - Reset, recovery, and audit export tools are strictly excluded from `ToolRegistry` (inaccessible to LLM).
+  - New Test Suites:
+    - [`tests/test_emergency_stop_reset.py`](./tests/test_emergency_stop_reset.py) (9 tests)
+    - [`tests/test_rate_limiter.py`](./tests/test_rate_limiter.py) (7 tests)
+    - [`tests/test_execution_budgets.py`](./tests/test_execution_budgets.py) (7 tests)
+    - [`tests/test_safety_checkpoints.py`](./tests/test_safety_checkpoints.py) (5 tests)
+    - [`tests/test_audit_export.py`](./tests/test_audit_export.py) (10 tests)
+- [x] Phase 6, Prompt 1: React + Vite Frontend Dashboard Foundation in [`frontend/`](./frontend/):
+  - Application Architecture: Clean React 18 + Vite 6 + TypeScript desktop application scaffold with modular component organization.
+  - Design System: Dark modern desktop-agent theme implemented in [`frontend/src/styles/globals.css`](./frontend/src/styles/globals.css) and [`frontend/src/styles/dashboard.css`](./frontend/src/styles/dashboard.css) featuring neutral charcoal background, subtle borders, restrained accents, and responsive layout across desktop, laptop, and mobile viewports.
+  - Centralized API Client ([`frontend/src/api/client.ts`](./frontend/src/api/client.ts)): Typed request methods for existing FastAPI backend routes (`/health`, `/`, `/agent/emergency-stop/status`, `/agent/conversations`, `/agent/tools`) with timeout handling, error normalization, and configurable `VITE_API_BASE_URL` (defaulting to `http://127.0.0.1:8000`).
+  - Backend Connectivity & Health Hook ([`frontend/src/hooks/useBackendHealth.ts`](./frontend/src/hooks/useBackendHealth.ts)): Periodic 15s health-check polling tracking connection state (`connected`, `disconnected`, `checking`), backend service metadata, emergency-stop status, and manual refresh triggers.
+  - Reusable Component Foundation:
+    - Common states: `LoadingState.tsx`, `ErrorState.tsx`, `EmptyState.tsx`, `UpcomingSection.tsx`.
+    - Layout: `Header.tsx` (title, status pill, last checked timestamp, refresh button, settings quick link), `Sidebar.tsx` (responsive collapsible sidebar, navigation, emergency-stop footer badge), `AppLayout.tsx`.
+    - Dashboard: `StatusCard.tsx` (reusable metric cards), `BackendStatus.tsx` (detailed connectivity telemetry), `SystemOverview.tsx` (clear unavailable state explaining unexposed system metrics route per security boundaries), `RecentActivity.tsx` (queries persistent SQLite conversation sessions, displaying empty state when clean).
+  - Navigation: 7 navigation items (Dashboard fully functional; AI Agent, Executions, Confirmations, Automation, Audit Logs, and Settings cleanly marked as upcoming with dedicated informational views and zero fake API calls).
+  - Backend CORS Integration: Added `CORSMiddleware` to [`backend/main.py`](./backend/main.py) restricted strictly to local frontend origins (`http://localhost:5173`, `http://127.0.0.1:5173`, `http://localhost:4173`, `http://127.0.0.1:4173`).
+  - Phase 5 Test-Count Investigation: Verified exact collection of 560 tests (557 non-live + 3 live). Confirmed Phase 5 Prompt 2 added 38 new tests to the Phase 5 Prompt 1 baseline of 519 non-live tests ($519 + 38 = 557$), with 0 replaced or removed tests.
+  - Frontend Verification: Passed `npm run lint` (0 errors, 0 warnings), `npm run typecheck` (0 errors), `npm run build` (clean production bundle generated).
+- [x] Phase 6, Prompt 2: AI Agent Chat, Execution History, Confirmations, and Safety Controls in [`frontend/`](./frontend/):
+  - AI Agent Chat Interface ([`frontend/src/pages/AgentPage.tsx`](./frontend/src/pages/AgentPage.tsx)):
+    - Integrated with `POST /agent/execute` and conversation management endpoints.
+    - Multiturn conversation sessions stored in SQLite with dynamic session switching and fresh session initialization via `ConversationList.tsx`.
+    - Message stream rendering user prompts, agent responses, tool step execution summaries, cancellation notices, and pending confirmation alerts via `ChatMessage.tsx`.
+    - Auto-scrolling message container and duplicate submission prevention during active processing.
+    - Real-time execution progression banner (`ExecutionProgress.tsx`) reflecting true backend statuses (`executing`, `confirmation_required`, `completed`, `failed`, `cancelled`, `rate_limited`).
+  - Execution History & Step Telemetry ([`frontend/src/pages/ExecutionsPage.tsx`](./frontend/src/pages/ExecutionsPage.tsx)):
+    - Fetches persistent execution records from SQLite across all conversations (`ExecutionList.tsx`).
+    - Filterable by status (`all`, `completed`, `failed`, `cancelled`, `confirmation_required`, `rate_limited`).
+    - Detailed execution inspection modal (`ExecutionDetails.tsx`) and step viewer (`ExecutionStep.tsx`) rendering planned sequences, tool outputs, and sanitized parameter summaries.
+  - Human-in-the-Loop Confirmation Center ([`frontend/src/pages/ConfirmationsPage.tsx`](./frontend/src/pages/ConfirmationsPage.tsx)):
+    - Dedicated security review queue discovering pending consequential actions (`ConfirmationCard.tsx`).
+    - Explicit approval and rejection modal dialogs (`ConfirmationDialog.tsx`) bound to cryptographic confirmation tokens with optional rejection reasons.
+    - Prominent development security notice banner explaining the localhost desktop trust boundary.
+    - Zero token leakage, zero assistant self-approval, single-use token consumption.
+  - Global Emergency Stop Safety Controls ([`frontend/src/components/safety/EmergencyStopPanel.tsx`](./frontend/src/components/safety/EmergencyStopPanel.tsx)):
+    - Prominently visible emergency stop panel integrated directly on the Dashboard and sidebar.
+    - Big red "EMERGENCY STOP" trigger button invoking `POST /agent/emergency-stop`.
+    - Safe reset confirmation dialog (`ResetConfirmationDialog.tsx`) enforcing active operation zero-check before reset, handling HTTP 409 Conflict.
+  - Navigation Integration: Dashboard, AI Agent, Executions, and Confirmations sidebar items are fully functional. Automation, Audit Logs, and Settings remain cleanly designated as upcoming.
+  - Automation Monitoring Page ([`frontend/src/pages/AutomationPage.tsx`](./frontend/src/pages/AutomationPage.tsx)):
+    - Real-time telemetry monitoring for desktop automation controllers (Keyboard, Mouse, Window, Browser, Filesystem).
+    - Truthful "Status unavailable" reporting for internal controllers without unauthenticated public polling routes.
+    - Integrated with emergency-stop status and active background operation tracking.
+    - Category-filtered tool allowlist display from `GET /agent/tools` identifying consequential operations requiring human confirmation.
+    - Strict read-only safety guardrails: zero direct keyboard, mouse, or shell command buttons exposed to the browser.
+  - Audit Logs & Sanitized Export Archive ([`frontend/src/pages/AuditLogsPage.tsx`](./frontend/src/pages/AuditLogsPage.tsx)):
+    - Execution audit log list with status, conversation, date range, and text search filters.
+    - Detailed audit record inspection drawer with plan steps, tool results, and verified credential scrubbing.
+    - Export trigger form for structured JSON and flattened CSV with custom filename validation (blocking path traversal like `../`).
+    - Overwrite protection requiring explicit confirmation checkbox to prevent accidental file overwrites.
+    - Safe browser blob download handling: streams from `GET /agent/audit/exports/{id}/download`, creates temporary Object URLs, schedules immediate cleanup, and never auto-executes downloaded files.
+  - Backend API Client & Endpoints:
+    - Extended `frontend/src/api/client.ts` with `exportAuditTrail()`, `getAuditExportStatus()`, `listAuditExports()`, and `downloadAuditExport()`.
+    - Added `GET /agent/audit/exports` and `GET /agent/audit/exports/{id}/download` in `backend/api/agent.py` with CSRF Origin validation, canonical export directory containment, and `Content-Disposition` header exposure.
+  - Navigation Activation:
+    - Activated `Automation` and `Audit Logs` in `navTypes.tsx`.
+    - `Settings` cleanly designated as planned for future configuration.
+  - Complete Frontend & Browser Test Suites:
+    - Vitest unit & component test suite expanded to 29 tests across all pages and safety invariants.
+    - End-to-end browser integration suite in `tests/test_frontend_browser.py` verifying 8 mandatory scenarios using headless Chromium.
+- [x] Phase 7, Step 1: Full-System Integration Testing and Security Audit:
+  - Architecture Integration & Execution Auditing:
+    - Verified cross-layer execution flow: React frontend (`frontend/src/`) -> FastAPI REST endpoints (`backend/api/agent.py`) -> LangGraph agent (`backend/agent/graph.py`) -> Intent recognition & planning (`backend/agent/planner.py`) -> Tool Registry (`backend/agent/tool_registry.py`) -> Tool Executor (`backend/agent/tool_executor.py`) -> Win32/Playwright Controllers (`backend/automation/`) -> SQLite database (`backend/database/`) -> React state update.
+    - Verified voice pipeline loop parity: Audio capture -> Streaming VAD -> Speech-to-Text (Faster-Whisper) -> LangGraph agent (`process_request`) -> Text-to-Speech (Piper TTS) -> Audio playback.
+  - End-to-End Workflow Verification: Verified all 10 core system workflows:
+    - Workflow A: General Conversational Queries (zero tool execution, pure LLM response).
+    - Workflow B: Single Application Launching (Notepad launched safely, PID tracked, allowlist enforced).
+    - Workflow C: Multi-Step Application Control (Launch Notepad, wait for ready, bring to foreground, type text, take window screenshot).
+    - Workflow D: Filesystem Discovery & Inspection (`list_directory`, `search_files`, `get_file_metadata` within user folder boundaries).
+    - Workflow E: Follow-Up Pronoun & Contextual Resolution ("minimize it", "delete the first file" resolved via `ConversationContextManager`).
+    - Workflow F: Safe Browser Automation (Playwright headless Chromium, ephemeral context, domain resolution, SSRF blocking, DOM extraction).
+    - Workflow G: Confirmation-Required Consequential Actions (`delete_file`, `delete_folder`, consequential browser actions requiring cryptographic single-use tokens).
+    - Workflow H: Global Emergency Stop & Reset (`Ctrl+Alt+Escape` Win32 hotkey, immediate modifier/button release, fail-closed latching, 409 rejection on active operations).
+    - Workflow I: Rate Limiting & Resource Budgets (sliding-window request limits, duration budget, step budget, tool-call budgets).
+    - Workflow J: Audit Trail Browsing & Safe Export (sanitized JSON/CSV generation in `data/exports`, path traversal guards, safe browser blob download).
+  - Security & Trust Boundary Audit:
+    - Confirmation tokens: 256-bit entropy (`secrets.token_urlsafe(32)`), single-use consumption (`validate_and_consume`), SHA-256 parameter hashing, 300s TTL. Excluded from `ToolRegistry` to prevent LLM self-approval. Zero token leakage in speech, logs, exports, or DOM.
+    - Localhost boundary disclosure: Bound strictly to `127.0.0.1`. CORS and `Origin` validation protect against browser CSRF attacks (e.g. malicious sites calling localhost APIs), but does not authenticate the human operator against other local processes or multi-user OS accounts.
+    - Emergency Stop: Fail-closed latching, Win32 `RegisterHotKey` message loop, `release_system_inputs()` releases Ctrl/Alt/Shift/Win and mouse buttons. Safe reset strictly enforces zero active operations.
+  - Progress Reporting Protocol Clarification:
+    - Investigated progress mechanism: Confirmed that agent execution uses asynchronous HTTP POST request-response (`POST /agent/execute`), with the frontend managing state rendering and visual message streams. There are NO WebSockets or Server-Sent Events (SSE). UI container naming (`.messages-stream-container`) represents UI message layout, not network streaming.
+  - Latent Defect Remediation:
+    - Discovered and resolved missing `SQLModel` import in `backend/database/repository.py` causing swallowed `NameError` during sync metadata creation.
+  - Git Working-Tree Discrepancy Clarification:
+    - Investigated Git working-tree status: 19 modified files and 10 untracked directories represent intentional unstaged work from previous phases preserved per "do not commit changes" instruction. The colloquial phrase "clean working tree" in previous handover reports referred to the absence of leftover temporary/crash files, not Git commit status.
+  - Test Suite Reconciliation:
+    - Pytest non-live: 569 passed (561 backend unit/integration tests + 8 Playwright browser integration tests in `tests/test_frontend_browser.py`).
+    - Pytest live: 3 passed (Notepad launch, Notepad window management, Playwright browser lifecycle).
+    - Vitest frontend: 29 passed.
+    - Total unique tests: 601 passed, 0 failed.
+
+- [x] Phase 7, Step 2: Standalone Windows Packaging and Distribution (PyInstaller One-Folder Distribution):
+  - `backend/paths.py`: Unified runtime path resolution subsystem supporting both development mode and frozen PyInstaller bundle (`sys._MEIPASS` / `sys.executable` detection):
+    - `is_frozen()`: Detects whether application is running inside a PyInstaller frozen bundle.
+    - `get_bundle_dir()`: Returns PyInstaller bundle extraction root (`_internal`) or repository root in dev.
+    - `get_executable_dir()`: Returns the directory containing the launched executable or repository root.
+    - `get_user_data_dir()`: Returns `%LOCALAPPDATA%\VoxPilot` (with fallback to `~/.voxpilot`), ensuring application data and logs never write into frozen installation directories.
+    - Configured paths: `get_database_path()` (`data/voxpilot.db`), `get_log_dir()` (`logs/`), `get_export_dir()` (`exports/`), `get_config_dir()` (`config/`), `get_voice_temp_dir()` (`voice_temp/`), `get_frontend_dist_dir()` (`frontend/dist/`), `get_piper_model_path()` (`models/piper/en_US-lessac-medium.onnx`).
+    - Environment overrides: `VOXPILOT_DATA_DIR`, `VOXPILOT_DB_PATH`, `VOXPILOT_LOG_DIR`, `VOXPILOT_EXPORT_DIR`, `VOXPILOT_CONFIG_DIR`, `VOXPILOT_VOICE_TEMP_DIR`, `VOXPILOT_FRONTEND_DIST`, `VOXPILOT_PIPER_MODEL`.
+  - Single-Port Full-Stack Hosting in `backend/main.py`:
+    - Serves compiled React frontend dashboard from single local port (default 8000).
+    - Mounted `/assets` directory for Vite production chunks (CSS, JS).
+    - Dual-mode root route (`GET /`): Returns `index.html` when `Accept: text/html` is requested; returns JSON metadata when `Accept: application/json` is requested (preserving automated API test compatibility).
+    - Client-side SPA routing fallback: Non-API routes serve `index.html` to support browser refresh on frontend routes (`/chat`, `/executions`, `/confirmations`, `/automation`, `/audit`).
+  - Standalone Daemon Entrypoint in `launcher.py`:
+    - Dual console and file logging to `%LOCALAPPDATA%\VoxPilot\logs\voxpilot.log`.
+    - Startup preflight diagnostics: Checks Ollama LLM endpoint (`http://127.0.0.1:11434`), Piper TTS voice model file, and Playwright Chromium executable. Reports actionable guidance on missing dependencies without crashing.
+    - Startup banner displaying version, frozen mode, server URL, database path, and emergency stop hotkey.
+    - Auto-launches default browser to dashboard (can be disabled via `VOXPILOT_AUTO_OPEN_BROWSER=0`).
+    - Clean Uvicorn server execution and graceful shutdown handling.
+  - Distribution Packaging (`VoxPilot.spec` and `hooks/`):
+    - One-folder PyInstaller specification producing `dist/VoxPilot/` containing `VoxPilot.exe` (~31.6 MB) and `_internal/`.
+    - Bundled assets: Compiled React frontend (`frontend/dist`), Piper ONNX voice model, and Playwright node driver.
+    - Custom hook `hooks/hook-webrtcvad.py` resolving metadata discrepancies between `webrtcvad` and `webrtcvad-wheels`.
+    - Distribution readme `README_DIST.txt` copied to `dist/VoxPilot/README.txt`.
+  - End-to-End Distribution & Relocation Verification (`scripts/verify_distribution.py`):
+    - In-place execution test: Starts `dist/VoxPilot/VoxPilot.exe` on port 8001; verifies `/health`, JSON `/`, HTML React `/`, `/agent/emergency-stop/status`, `/agent/tools` (37 registered tools), and `/agent/conversations` (database query).
+    - Data persistence verification: Confirms `%LOCALAPPDATA%\VoxPilot\data\voxpilot.db` and `%LOCALAPPDATA%\VoxPilot\logs\voxpilot.log` are populated and persist across restarts.
+    - Relocation test: Copies entire `dist/VoxPilot/` to a temporary directory outside the repository (`%TEMP%\VoxPilot_Relocated_Test`), executes `VoxPilot.exe` on port 8002, verifies complete API and UI responsiveness, and cleans up cleanly.
+  - Test suites:
+    - `tests/test_paths.py`: 16 comprehensive unit tests covering dev mode, frozen mode simulation, environment variable overrides, and directory creation.
+    - `scripts/verify_distribution.py`: Live standalone executable validation and relocation testing passing 100%.
+
+- [x] Phase 7, Step 3: Windows Installer and First-Run Distribution Validation (Inno Setup 6):
+  - `installer/VoxPilot.iss`: Inno Setup 6 packaging script compiling the PyInstaller standalone one-folder distribution into `installer/Output/VoxPilot-Setup.exe`.
+  - Modern, Lowest-Privilege Per-User Installation:
+    - Default directory: `{localappdata}\Programs\VoxPilot` (`PrivilegesRequired=lowest`).
+    - Eliminates Windows UAC elevation prompts and administrator privilege requirements.
+    - Unique application GUID: `AppId={{8F97B634-9A25-45C0-943C-65935E17F193}}`.
+  - Start Menu & Desktop Integration:
+    - Creates Start Menu group `VoxPilot` with shortcuts: `VoxPilot` (application), `Install Playwright Browser` (browser setup utility), `VoxPilot Readme` (documentation), and `Uninstall VoxPilot` (uninstaller).
+    - Optional desktop shortcut task (`Tasks: desktopicon`).
+  - Pre-Installation Informational Notice (`installer/INSTALL_NOTICE.txt`):
+    - Informs users about data retention in `%LOCALAPPDATA%\VoxPilot`, external Ollama requirements (`qwen3:4b`), bundled Playwright browser setup, built-in speech models, and Emergency Stop (`Ctrl + Alt + Escape`).
+  - First-Run Bundled Browser Installer (`install_browser.bat` and `VoxPilot.exe --install-browser`):
+    - Directly executes bundled Playwright Node runtime (`_internal\playwright\driver\node.exe` with `cli.js install chromium`) to install Chromium into `%LOCALAPPDATA%\ms-playwright`.
+    - Zero Python or Node.js prerequisites required on end-user machines.
+  - Single-Instance Daemon Handling in `launcher.py`:
+    - Fast HTTP `/health` probe checks if an existing instance of VoxPilot is running on host/port.
+    - If already running, focuses/opens the browser dashboard at `http://127.0.0.1:8000/` and exits gracefully with code 0 instead of crashing or raising a port binding exception.
+  - Non-Blocking Dependency Preflight:
+    - Ollama model tags inspection (`/api/tags`) checking for `qwen3:4b`.
+    - Hugging Face cache check for `Systran/faster-whisper-base`.
+    - Actionable diagnostics emitted without preventing dashboard startup.
+  - Upgrade and Uninstall Safety Invariant:
+    - Application binaries are decoupled in `%LOCALAPPDATA%\Programs\VoxPilot`.
+    - Persistent state (SQLite `voxpilot.db`, logs, audit exports, screenshots) resides strictly in `%LOCALAPPDATA%\VoxPilot`.
+    - Upgrading over an existing installation preserves database and history without modification.
+    - Uninstallation cleanly removes binaries and shortcuts while leaving `%LOCALAPPDATA%\VoxPilot` 100% intact with a post-uninstall advisory dialog.
+  - Compiled Standalone Installer:
+    - Output: `installer/Output/VoxPilot-Setup.exe` (233,334,015 bytes, ~222.52 MB).
+    - SHA-256: `0036BC257FABCA414E9F0AA0B5A91554C04C292272B09A9D04FE50154285DAE0`.
+  - Comprehensive Verification Suite (`scripts/verify_installer.py`):
+    - Automated silent installation into custom path containing spaces (`%TEMP%\VoxPilot Custom Test Install`).
+    - Verified installed binary and shortcut layout.
+    - Live server startup and endpoint validation on port 8003 (`/health`, JSON `/`, HTML React `/`, Emergency Stop status, 37 registered tools, and SQLite query).
+    - Verified data persistence in `%LOCALAPPDATA%\VoxPilot`.
+    - Verified smooth upgrade over existing install with database preserved.
+    - Verified silent uninstallation removes binaries/shortcuts while preserving `%LOCALAPPDATA%\VoxPilot` (4,096 bytes database intact).
+
+- [x] Post-Phase 7 Enhancements: Critical Agent Planning Bug Fix & Voice Mode Integration with Customizable Global Keyboard Shortcut:
+  - Agent Planner Schema Enforcement & Multi-Step Command Decomposition (`backend/agent/planner.py`, `backend/agent/tool_registry.py`):
+    - Injected exact required/optional parameter names from `ToolRegistry` into LLM planning prompts so the LLM generates exact schema keys (`application_name`, `action`, `text`, etc.).
+    - Implemented deterministic boundary normalization (`_normalize_plan_steps`) mapping common LLM parameter synonyms (e.g., `application` -> `application_name`, `operation` -> `action`, `key_name` -> `key`, `shortcut_keys` -> `shortcut`) without weakening `ToolRegistry.validate_parameters()` (`extra="forbid"`).
+    - Implemented deterministic multi-step decomposition (`_build_deterministic_app_plan`, `_extract_app_and_typing_payload`) for application launch, window focus (`manage_window`), text typing (`type_text`), and Enter key press (`press_key`).
+    - Added 32 regression tests in [`tests/test_planner_bugfixes.py`](./tests/test_planner_bugfixes.py).
+  - Voice Mode Dashboard Integration & Customizable Windows Global Hotkey (`backend/voice/hotkey.py`, `backend/voice/voice_service.py`, `frontend/src/pages/AgentPage.tsx`, `frontend/src/pages/SettingsPage.tsx`):
+    - Reused existing `VoicePipeline`, `AudioRecorder`, `SpeechToText` (Faster-Whisper), `TextToSpeech` (Piper ONNX), and `StreamingVAD` (WebRTC VAD).
+    - Implemented `VoiceHotkeyListener` using Win32 `RegisterHotKey` on a dedicated background thread (`HOTKEY_ID_VOICE_MODE = 2`, default `Ctrl+Shift+V`) with `MOD_NOREPEAT`, software debounce, automatic rollback to previous valid shortcut on `WinError 1409` conflict, clean `WM_QUIT` + `UnregisterHotKey` shutdown, and strict reservation blocking `Ctrl+Alt+Escape`.
+    - Implemented `VoiceSettingsManager` persisting user voice & shortcut preferences in `%LOCALAPPDATA%\VoxPilot\config\voice_settings.json`.
+    - Added interactive microphone toggle button, live voice phase indicator (`listening`, `transcribing`, `processing`, `speaking`, `error`, `idle`), live transcript/response synchronization, and `Stop Voice` cancellation in `AgentPage.tsx` and `ChatInput.tsx`.
+    - Implemented `SettingsPage.tsx` with interactive "Change Shortcut" key capture, microphone selector, privacy-preserving in-memory `Test Microphone` check, Piper TTS toggle & voice selector, and Faster-Whisper / Streaming VAD status cards.
+    - Fixed frontend initial health check race condition so `AgentPage` never falsely flashes `"Backend disconnected"`.
+    - Added 20 backend tests in [`tests/test_voice_mode_and_shortcut.py`](./tests/test_voice_mode_and_shortcut.py) and 6 frontend tests in [`frontend/src/tests/voiceAndSettings.test.ts`](./frontend/src/tests/voiceAndSettings.test.ts).
+  - Complete Application Icon Replacement & Branding (`assets/icons/`, `VoxPilot.spec`, `installer/VoxPilot.iss`, `frontend/`):
+    - Generated official multi-resolution Windows `.ico` (`assets/icons/voxpilot.ico` containing 16x16, 24x24, 32x32, 48x48, 64x64, 128x128, and 256x256 frames) and high-resolution `.png` assets (`16x16` through `1024x1024`) from the authoritative VoxPilot icon design via [`scripts/generate_icons.py`](./scripts/generate_icons.py).
+    - Embedded official icon and Windows PE version metadata ([`assets/version_info.txt`](./assets/version_info.txt)) into `VoxPilot.exe` via `VoxPilot.spec` and configured Windows 11 `AppUserModelID` and `WM_SETICON` in `launcher.py`.
+    - Replaced default `/vite.svg` placeholder with `/favicon.ico`, `/favicon-32x32.png`, `/favicon-16x16.png`, `/apple-touch-icon.png`, and `/voxpilot-logo.png` across `frontend/index.html`, `Sidebar.tsx`, and `Header.tsx`.
+    - Updated `installer/VoxPilot.iss` with `SetupIconFile`, `WizardSmallImageFile`, version info metadata, and explicit `IconFilename` and `AppUserModelID` bindings for Start Menu, Desktop, and Uninstaller shortcuts.
+  - In-App Software Update System (Phase 1 — Application-Side Update Functionality):
+    - Centralized version authority in [`VERSION`](./VERSION) (`0.5.0`) and [`backend/version.py`](./backend/version.py) with SemVer 2.0.0 comparison.
+    - GitHub release checker, HTTPS & trusted-host validator, streaming downloader with cancellation, mandatory SHA-256 checksum verifier, Windows Authenticode inspector, and detached external updater orchestrator in [`backend/updater/update_service.py`](./backend/updater/update_service.py) and [`backend/updater/updater_runner.py`](./backend/updater/updater_runner.py).
+    - Persistent update preferences in `%LOCALAPPDATA%\VoxPilot\config\update_settings.json` (`auto_check_enabled`, `channel`, `release_repo`, `dismissed_version`, and enforced `auto_install_enabled: False`).
+    - Dashboard update notification banner ([`UpdateNotificationBanner.tsx`](./frontend/src/components/updates/UpdateNotificationBanner.tsx)) and Settings page Software Updates card ([`SettingsPage.tsx`](./frontend/src/pages/SettingsPage.tsx)) with explicit Installation Confirmation modal.
+    - Added 39 backend/updater tests ([`tests/test_update_system.py`](./tests/test_update_system.py)) and 9 frontend tests ([`frontend/src/tests/updateSystem.test.ts`](./frontend/src/tests/updateSystem.test.ts)).
 
 ---
 
 ## 3. Features In Progress
-None. Phase 5, Prompt 1 is fully complete and approved.
+None. All planned implementation phases (Phases 1 through 7) and post-release enhancements are complete.
 
 ---
 
 ## 4. Features Not Started
-- Phase 5, Prompt 2+: Additional Safety Guardrails, System Confirmation Hardening, Rate Limiting.
-- Phase 6: Frontend Dashboard (React + Vite).
-- Phase 7: Testing, Packaging, and Distribution (PyInstaller).
+None. All 7 planned development phases and milestone tasks are fully complete and verified.
 
 ---
 
 ## 5. Known Issues & Hardware Considerations
 - System hardware: 16GB DDR5 RAM, Intel Core 5 205H, NVIDIA RTX 3050 (6GB VRAM).
 - GPU VRAM constraint: 6GB VRAM requires lightweight quantized LLMs (e.g., Qwen 2.5 3B/Qwen 1.5/2.5 4B) and careful memory budgeting. Faster-Whisper can fall back to CPU with INT8 compute if VRAM is congested.
-- Pretrained Wake Word Catalog: openWakeWord includes official models (`hey_jarvis_v0.1`, `alexa_v0.1`, `hey_mycroft_v0.1`). A custom model for "Hey VoxPilot" requires training with ~20,000–50,000 synthetic Piper TTS utterances as outlined in `models/wake_word/README.md`.
-- Windows 11 Packaged Apps: Calculator (`calc.exe`) spawns via launcher stub which terminates immediately after triggering the UWP broker. The launcher captures PID cleanly upon creation without blocking.
-- Symlinks / Reparse Points: Path resolution validates canonical targets against approved directory roots. Reparse-point redirection outside approved locations is rejected.
-- Multi-Monitor Virtual Coordinates: Monitors arranged to the left or top of the primary monitor use negative coordinates; bounds checking queries `SM_XVIRTUALSCREEN` and `SM_YVIRTUALSCREEN` rather than assuming `(0, 0)`.
-- UIPI Integrity Boundaries: Windows prevents standard user processes from injecting input into elevated/admin windows. VoxPilot detects `ERROR_ACCESS_DENIED` and raises `UIPIRestrictedError`.
-- Windows DWM Frame Bounds: Standard `GetWindowRect` includes invisible window drop-shadow borders; VoxPilot queries `DwmGetWindowAttribute` with `DWMWA_EXTENDED_FRAME_BOUNDS` for pixel-accurate window cropping.
-- Browser Ephemeral Isolation: Playwright executes in headless/headed Chromium using an isolated context; personal browser profiles, cookies, and saved passwords are never accessed.
-- SQLite Database Location: Persistent database is stored in `data/voxpilot.db` (git-ignored) with automatic directory creation and schema migration.
-- Localhost HTTP Development Boundary: REST confirmation approval on localhost (`127.0.0.1`) represents a development trust boundary; full cryptographic user authentication will be layered in Phase 6 with the frontend.
-- Windows Global Hotkey Ownership: `Ctrl + Alt + Escape` hotkey is registered via Win32 `RegisterHotKey`. If another process has already registered this combo, registration logs a warning without crashing.
+- External Dependency Notice: The standalone `VoxPilot.exe` requires the local Ollama daemon running on `http://127.0.0.1:11434` with `qwen3:4b` for LLM planning. The pre-flight check logs a clear diagnostic if Ollama is offline.
+- Playwright Chromium Path in Frozen Mode: Chromium browser binaries reside in `%LOCALAPPDATA%\ms-playwright`. `launcher.py` and `install_browser.bat` automate this installation without requiring Python on target machines.
+- SQLite Database Location: In standalone and installed mode, the database resides in `%LOCALAPPDATA%\VoxPilot\data\voxpilot.db`. In development mode, it resides in `data/voxpilot.db`.
+- Windows Global Hotkey Ownership: `Ctrl + Alt + Escape` (Emergency Stop) and `Ctrl + Shift + V` (Voice Mode toggle) are registered via Win32 `RegisterHotKey`. If another process has already registered a shortcut, VoxPilot reports the conflict clearly without crashing.
 
 ---
 
 ## 6. Latest Successful Tests
-- `pytest tests/ -v -m "not live"`: Passed (519/519 unit and integration tests passing across Emergency Stop, Emergency Stop API, Agent Cancellation, Emergency Stop Integration, Confirmation Security, Database Concurrency, Agent Integration, Database Repository, Conversational Memory, Dynamic Re-Planning, Agent API, Agent Execution Graph, Tool Registry, Confirmation Manager, Browser Controller, File Manager, Screenshot Controller, Keyboard Controller, Mouse Controller, Window Manager, Security Regression, Application Launcher, Wake Word Detection, Streaming VAD, Batch Silero VAD, Audio Preprocessor, Microphone Selection, and Voice Subsystem).
-- `pytest -m live -v`: Passed (3/3 live tests passing: Notepad launch, Notepad window management, and controlled Chromium browser automation). Total: 522 automated tests passing (0 failed).
-- `python -m pip check`: Passed (no broken requirements).
-- `pip install --dry-run -r requirements.txt`: Passed (all dependencies resolved cleanly without conflicts).
-- Core package import check: Passed (LangGraph, LangChain, langchain-ollama, Faster-Whisper, Piper TTS, openWakeWord, PyAutoGUI, pywinauto, FastAPI, SQLModel, aiosqlite, Playwright, psutil, MCP).
+- `pytest tests/ -v -m "not live"`: Passed (677/677 non-live tests passing across 669 backend unit/integration tests and 8 frontend browser integration tests in 38.32s).
+- `pytest -m live -v`: Passed (3/3 live tests passing: Notepad launch, Notepad window management, and controlled Chromium browser automation in 15.72s).
+- Total Pytest Suite: Passed (680/680 tests passing: 677 non-live + 3 live).
+- `frontend/ npm test`: Passed (44/44 Vitest tests passing in 1.46s).
+- `frontend/ npm run lint`: Passed (0 errors, 0 warnings).
+- `frontend/ npm run typecheck`: Passed (0 errors).
+- `frontend/ npm run build`: Passed (production bundle 300.11 kB JS, 57.70 kB CSS generated in 3.40s).
+- `python -m pip check`: Passed (no broken requirements found).
+- `scripts/verify_distribution.py`: Passed (in-place `dist/VoxPilot/VoxPilot.exe` execution, `/api/version` & `/api/updates/status` verification, `/agent/voice/status` verification, `/favicon.ico` & `/voxpilot-logo.png` verification, database persistence, and external relocation testing).
+- Total automated tests passing: 724 tests (680 pytest + 44 vitest).
 
 ---
 
 ## 7. Next Immediate Task
-Phase 5, Prompt 2: Additional Agent Safety Guardrails and Action Rate Limiting.
+Phase 7 Step 3 (Windows Installer and First-Run Distribution Validation) is complete. Deliver the comprehensive final ChatGPT Handover Report.
 

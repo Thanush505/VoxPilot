@@ -11,6 +11,7 @@ import functools
 import logging
 import threading
 from typing import Dict, Any, Optional, List
+from pathlib import Path
 import anyio
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
@@ -28,6 +29,17 @@ from backend.automation.emergency_stop import (
     get_shared_emergency_stop_manager,
     EmergencyStopActiveError,
     UnsafeResetError,
+)
+from backend.database.audit_export import get_shared_audit_exporter
+from backend.voice.audio_recorder import AudioRecorderError
+from backend.voice.hotkey import (
+    ReservedShortcutError,
+    ShortcutConflictError,
+    ShortcutValidationError,
+)
+from backend.voice.voice_service import (
+    get_shared_voice_service,
+    list_available_piper_voices,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,7 +109,34 @@ class EmergencyStopRequest(BaseModel):
 
 
 class EmergencyStopResetRequest(BaseModel):
-    force: bool = Field(False, description="Force reset even if operations cannot be verified.")
+    force: bool = Field(False, description="Deprecated force reset flag; disallowed in favor of operator recovery.")
+
+
+class EmergencyStopRecoveryRequest(BaseModel):
+    operator_justification: str = Field(..., min_length=10, description="Justification explaining verified physical/system state.")
+    confirmed_terminated_operations: List[str] = Field(default_factory=list, description="List of operation IDs verified terminated.")
+    verification_evidence: Optional[Dict[str, Any]] = Field(default=None, description="Optional evidence such as checked PIDs or logs.")
+
+
+class AuditExportRequest(BaseModel):
+    format: str = Field("json", description="Export format: 'json' or 'csv'.")
+    filename: Optional[str] = Field(None, description="Optional custom destination filename (name only, no paths).")
+    execution_id: Optional[str] = Field(None, description="Optional execution ID filter.")
+    conversation_id: Optional[str] = Field(None, description="Optional conversation ID filter.")
+    status_filter: Optional[str] = Field(None, description="Optional status filter ('completed', 'failed', 'cancelled', 'rate_limited').")
+    start_date: Optional[str] = Field(None, description="Optional start datetime filter (ISO format or YYYY-MM-DD).")
+    end_date: Optional[str] = Field(None, description="Optional end datetime filter (ISO format or YYYY-MM-DD).")
+    confirm_overwrite: bool = Field(False, description="Whether to overwrite existing export file if it exists.")
+
+
+class AuditExportResponse(BaseModel):
+    export_id: str
+    filename: str
+    file_path: str
+    format: str
+    record_count: int
+    exported_at: str
+    status: str
 
 
 class EmergencyStopStatusResponse(BaseModel):
@@ -220,6 +259,13 @@ async def execute_request(request: ExecuteRequest):
 
     exec_id = final_state.get("execution_id", "")
     save_execution(exec_id, final_state)
+
+    if final_state.get("execution_status") == "rate_limited":
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=final_state.get("error") or "Rate limit or execution budget exceeded.",
+        )
+
     return final_state
 
 
@@ -528,3 +574,356 @@ async def reset_emergency_stop_endpoint(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(err),
         )
+
+
+@router.post("/emergency-stop/recover")
+async def recover_emergency_stop_endpoint(
+    http_request: Request,
+    req: EmergencyStopRecoveryRequest,
+):
+    """Authorized operator endpoint to recover from emergency stop with verified evidence."""
+    _verify_trusted_request(http_request)
+    manager = get_shared_emergency_stop_manager()
+    try:
+        status_info = manager.operator_emergency_recovery(
+            operator_justification=req.operator_justification,
+            confirmed_terminated_operations=req.confirmed_terminated_operations,
+            verification_evidence=req.verification_evidence,
+        )
+        return {
+            "success": True,
+            "message": "Emergency stop recovery completed successfully.",
+            **status_info,
+        }
+    except ValueError as val_err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(val_err),
+        )
+    except UnsafeResetError as err:
+        logger.warning(f"Emergency stop recovery rejected: {err}")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(err),
+        )
+
+
+# ==============================================================================
+# Audit Export Endpoints (Localhost Only, CSRF Protected)
+# ==============================================================================
+
+@router.post("/audit/export", response_model=AuditExportResponse)
+async def export_audit_trail_endpoint(
+    http_request: Request,
+    req: AuditExportRequest,
+):
+    """Securely export scrubbed audit records to JSON or CSV in the approved export directory."""
+    _verify_trusted_request(http_request)
+    exporter = get_shared_audit_exporter()
+
+    filters: Dict[str, Any] = {}
+    if req.execution_id:
+        filters["execution_id"] = req.execution_id
+    if req.conversation_id:
+        filters["conversation_id"] = req.conversation_id
+    if req.status_filter:
+        filters["status"] = req.status_filter
+    if req.start_date:
+        filters["start_date"] = req.start_date
+    if req.end_date:
+        filters["end_date"] = req.end_date
+
+    export_format = (req.format or "json").lower().strip()
+    try:
+        if export_format == "json":
+            result = exporter.export_json(
+                filename=req.filename,
+                filters=filters,
+                confirm_overwrite=req.confirm_overwrite,
+            )
+        elif export_format == "csv":
+            result = exporter.export_csv(
+                filename=req.filename,
+                filters=filters,
+                confirm_overwrite=req.confirm_overwrite,
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unsupported export format '{req.format}'. Supported formats: 'json', 'csv'.",
+            )
+        return AuditExportResponse(**result)
+    except FileExistsError as err:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(err),
+        )
+    except ValueError as val_err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(val_err),
+        )
+
+
+@router.get("/audit/exports", response_model=List[AuditExportResponse])
+async def list_audit_exports_endpoint(
+    http_request: Request,
+):
+    """Retrieve metadata for all previously generated audit exports in the approved directory."""
+    _verify_trusted_request(http_request)
+    exporter = get_shared_audit_exporter()
+    exports = exporter.list_exports()
+    return [AuditExportResponse(**exp) for exp in exports]
+
+
+@router.get("/audit/exports/{export_id}/status", response_model=AuditExportResponse)
+async def get_audit_export_status_endpoint(
+    http_request: Request,
+    export_id: str,
+):
+    """Retrieve metadata and status for a previously generated audit export."""
+    _verify_trusted_request(http_request)
+    exporter = get_shared_audit_exporter()
+    info = exporter.get_export_status(export_id)
+    if not info:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Audit export '{export_id}' not found.",
+        )
+    return AuditExportResponse(**info)
+
+
+@router.get("/audit/exports/{export_id}/download")
+async def download_audit_export_endpoint(
+    http_request: Request,
+    export_id: str,
+):
+    """Securely stream a generated audit export file to the user.
+
+    Validates export ID, enforces destination containment within approved export dir,
+    prevents path traversal, sets safe Content-Disposition headers, and never executes files.
+    """
+    _verify_trusted_request(http_request)
+
+    if not export_id or "/" in export_id or "\\" in export_id or ".." in export_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid export identifier format.",
+        )
+
+    exporter = get_shared_audit_exporter()
+    info = exporter.get_export_status(export_id)
+    if not info:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Audit export '{export_id}' not found.",
+        )
+
+    file_path = Path(info.get("file_path", "")).resolve()
+    try:
+        if not file_path.is_relative_to(exporter.export_dir) or not file_path.is_file():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Export file not found or unauthorized path.",
+            )
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid export file path resolution.",
+        )
+
+    export_format = str(info.get("format", "json")).lower()
+    media_type = "application/json" if export_format == "json" else "text/csv"
+    filename = str(info.get("filename", f"{export_id}.{export_format}"))
+
+    from fastapi.responses import FileResponse
+    return FileResponse(
+        path=str(file_path),
+        filename=filename,
+        media_type=media_type,
+    )
+
+
+# ==============================================================================
+# Voice Mode & Customizable Global Shortcut Endpoints
+# ==============================================================================
+
+class VoiceStartRequest(BaseModel):
+    conversation_id: Optional[str] = Field(None, description="Optional conversation session identifier.")
+
+
+class VoiceStopRequest(BaseModel):
+    reason: Optional[str] = Field("Stopped by user", description="Optional reason for stopping voice mode.")
+
+
+class VoiceConfigUpdateRequest(BaseModel):
+    shortcut_enabled: Optional[bool] = Field(None, description="Enable or disable global keyboard shortcut.")
+    shortcut: Optional[str] = Field(None, description="Global keyboard shortcut string (e.g. 'Ctrl+Shift+V').")
+    microphone_device: Optional[Any] = Field(None, description="Microphone device index, name substring, or None for default.")
+    tts_enabled: Optional[bool] = Field(None, description="Enable or disable Piper text-to-speech playback.")
+    piper_voice: Optional[str] = Field(None, description="Installed Piper ONNX voice model filename.")
+    streaming_vad_enabled: Optional[bool] = Field(None, description="Enable or disable dynamic WebRTC streaming VAD.")
+
+
+class VoiceShortcutUpdateRequest(BaseModel):
+    shortcut: str = Field(..., min_length=1, description="New global keyboard shortcut combination (e.g. 'Ctrl+Shift+V').")
+    enabled: Optional[bool] = Field(None, description="Optional flag to enable or disable the shortcut simultaneously.")
+
+
+class MicrophoneTestRequest(BaseModel):
+    device: Optional[Any] = Field(None, description="Microphone device index, name, or None for currently selected device.")
+    duration_seconds: float = Field(0.5, ge=0.1, le=2.0, description="Test sample duration in seconds.")
+
+
+@router.get("/voice/status")
+async def get_voice_status_endpoint(
+    since_event_id: int = Query(0, ge=0, description="Return voice events with event_id greater than this value."),
+):
+    """Retrieve live voice mode state, component diagnostics, shortcut status, and recent voice events."""
+    voice_service = get_shared_voice_service()
+    return await anyio.to_thread.run_sync(
+        functools.partial(voice_service.get_status, since_event_id=since_event_id)
+    )
+
+
+@router.post("/voice/start")
+async def start_voice_mode_endpoint(
+    http_request: Request,
+    req: Optional[VoiceStartRequest] = None,
+):
+    """Activate Voice Mode and start listening for spoken commands."""
+    _verify_trusted_request(http_request)
+    voice_service = get_shared_voice_service()
+    conv_id = req.conversation_id if req else None
+    return await anyio.to_thread.run_sync(
+        functools.partial(voice_service.start_voice_mode, conversation_id=conv_id, source="ui")
+    )
+
+
+@router.post("/voice/stop")
+async def stop_voice_mode_endpoint(
+    http_request: Request,
+    req: Optional[VoiceStopRequest] = None,
+):
+    """Immediately stop active Voice Mode, cancel recording/playback, and release microphone."""
+    _verify_trusted_request(http_request)
+    voice_service = get_shared_voice_service()
+    reason = req.reason if req and req.reason else "Stopped by user"
+    return await anyio.to_thread.run_sync(
+        functools.partial(voice_service.stop_voice_mode, reason=reason)
+    )
+
+
+@router.post("/voice/toggle")
+async def toggle_voice_mode_endpoint(
+    http_request: Request,
+    req: Optional[VoiceStartRequest] = None,
+):
+    """Toggle Voice Mode on or off."""
+    _verify_trusted_request(http_request)
+    voice_service = get_shared_voice_service()
+    conv_id = req.conversation_id if req else None
+    return await anyio.to_thread.run_sync(
+        functools.partial(voice_service.toggle_voice_mode, conversation_id=conv_id, source="ui")
+    )
+
+
+@router.get("/voice/config")
+async def get_voice_config_endpoint():
+    """Retrieve current persistent voice settings and shortcut registration status."""
+    voice_service = get_shared_voice_service()
+    return {
+        "settings": voice_service.settings_manager.get_settings(),
+        "shortcut_status": voice_service.hotkey_listener.get_status(),
+    }
+
+
+@router.post("/voice/config")
+async def update_voice_config_endpoint(
+    http_request: Request,
+    req: VoiceConfigUpdateRequest,
+):
+    """Validate, apply, and persist updated voice settings."""
+    _verify_trusted_request(http_request)
+    voice_service = get_shared_voice_service()
+    updates = req.model_dump(exclude_unset=True)
+    try:
+        return await anyio.to_thread.run_sync(
+            functools.partial(voice_service.update_config, updates)
+        )
+    except ReservedShortcutError as err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(err),
+        )
+    except (ShortcutValidationError, AudioRecorderError, ValueError) as err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(err),
+        )
+    except ShortcutConflictError as err:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(err),
+        )
+
+
+@router.post("/voice/shortcut")
+async def update_voice_shortcut_endpoint(
+    http_request: Request,
+    req: VoiceShortcutUpdateRequest,
+):
+    """Validate, register on Windows, and persist a custom global Voice Mode keyboard shortcut."""
+    _verify_trusted_request(http_request)
+    voice_service = get_shared_voice_service()
+    try:
+        return await anyio.to_thread.run_sync(
+            functools.partial(voice_service.update_shortcut, req.shortcut, enabled=req.enabled)
+        )
+    except ReservedShortcutError as err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(err),
+        )
+    except ShortcutValidationError as err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(err),
+        )
+    except ShortcutConflictError as err:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(err),
+        )
+
+
+@router.get("/voice/microphones")
+async def list_microphones_endpoint():
+    """List available microphone input devices and currently selected microphone."""
+    voice_service = get_shared_voice_service()
+    return await anyio.to_thread.run_sync(voice_service.list_microphones)
+
+
+@router.post("/voice/microphones/test")
+async def test_microphone_endpoint(
+    http_request: Request,
+    req: Optional[MicrophoneTestRequest] = None,
+):
+    """Test microphone input capture and signal level without saving audio to disk."""
+    _verify_trusted_request(http_request)
+    voice_service = get_shared_voice_service()
+    device = req.device if req else None
+    duration = req.duration_seconds if req else 0.5
+    return await anyio.to_thread.run_sync(
+        functools.partial(voice_service.test_microphone, device=device, duration_seconds=duration)
+    )
+
+
+@router.get("/voice/voices")
+async def list_piper_voices_endpoint():
+    """List all installed Piper ONNX voice models."""
+    return {
+        "voices": list_available_piper_voices(),
+    }
+
+

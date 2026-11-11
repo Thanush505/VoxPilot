@@ -169,6 +169,15 @@ class DownloadSecurityError(BrowserControllerError):
     pass
 
 
+class BrowserBudgetExceededError(BrowserControllerError):
+    """Raised when navigation or download quotas per session are exceeded."""
+    pass
+
+
+MAX_SESSION_NAVIGATIONS = 5
+MAX_SESSION_DOWNLOADS = 3
+
+
 # ==============================================================================
 # Data Models
 # ==============================================================================
@@ -441,6 +450,8 @@ class BrowserController:
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
         self._page: Optional[Page] = None
+        self._navigation_count: int = 0
+        self._download_count: int = 0
 
         # Register emergency stop cleanup callback
         get_shared_emergency_stop_manager().register_cleanup_callback(self._emergency_cleanup)
@@ -475,6 +486,16 @@ class BrowserController:
         """Return canonical screenshot directory."""
         return self._screenshot_directory
 
+    @property
+    def navigation_count(self) -> int:
+        """Return number of navigations performed in current session."""
+        return self._navigation_count
+
+    @property
+    def download_count(self) -> int:
+        """Return number of downloads performed in current session."""
+        return self._download_count
+
     # --------------------------------------------------------------------------
     # 1. Start Browser Session
     # --------------------------------------------------------------------------
@@ -496,6 +517,9 @@ class BrowserController:
             raise BrowserSessionError(
                 "A browser session is already active. Close current session before starting a new one."
             )
+
+        self._navigation_count = 0
+        self._download_count = 0
 
         try:
             logger.info("Starting isolated Playwright Chromium instance...")
@@ -570,6 +594,9 @@ class BrowserController:
                     pass
                 self._playwright = None
 
+            self._navigation_count = 0
+            self._download_count = 0
+
             return {
                 "success": True,
                 "operation": "close_session",
@@ -612,6 +639,13 @@ class BrowserController:
             BrowserControllerError: If navigation failed.
         """
         get_shared_emergency_stop_manager().check_emergency_stop()
+
+        if self._navigation_count >= MAX_SESSION_NAVIGATIONS:
+            raise BrowserBudgetExceededError(
+                f"Browser session navigation limit exceeded: {self._navigation_count}/"
+                f"{MAX_SESSION_NAVIGATIONS} navigations. Start a new session."
+            )
+
         page = self._ensure_active_page()
 
         # 1. Pre-navigation validation
@@ -642,6 +676,7 @@ class BrowserController:
 
             status_code = response.status if response else 200
             title = page.title()
+            self._navigation_count += 1
 
             return {
                 "success": True,
@@ -1128,6 +1163,13 @@ class BrowserController:
             BrowserTimeoutError: If download fails to initiate within timeout.
         """
         get_shared_emergency_stop_manager().check_emergency_stop()
+
+        if self._download_count >= MAX_SESSION_DOWNLOADS:
+            raise BrowserBudgetExceededError(
+                f"Browser session download limit exceeded: {self._download_count}/"
+                f"{MAX_SESSION_DOWNLOADS} downloads. Session quota reached."
+            )
+
         page = self._ensure_active_page()
         effective_timeout = timeout_ms if timeout_ms is not None else self._timeout_ms
 
@@ -1254,6 +1296,7 @@ class BrowserController:
         try:
             download.save_as(str(dest_path))
             file_size = dest_path.stat().st_size if dest_path.exists() else 0
+            self._download_count += 1
             logger.info(f"Successfully downloaded '{final_filename}' ({file_size} bytes) to '{dest_path}'")
             return {
                 "success": True,

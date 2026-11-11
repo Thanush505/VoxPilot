@@ -7,6 +7,7 @@ import os
 import math
 import queue
 import logging
+import threading
 import sounddevice as sd
 import soundfile as sf
 import numpy as np
@@ -84,6 +85,16 @@ class AudioRecorder:
         self.min_speech_ms = min_speech_ms
         self.max_recording_seconds = max_recording_seconds
         self.start_timeout_seconds = start_timeout_seconds
+        self._cancel_event = threading.Event()
+        self.is_recording = False
+
+    def cancel(self):
+        """Request immediate cancellation of any active recording and release microphone."""
+        self._cancel_event.set()
+        try:
+            sd.stop()
+        except Exception:
+            pass
 
     @staticmethod
     def get_input_devices():
@@ -245,11 +256,12 @@ class AudioRecorder:
             f"Could not find a supported recording configuration for device {device_idx}."
         )
 
-    def record(self, duration=5):
+    def record(self, duration=5, stop_event=None):
         """Record audio for a fixed duration, automatically resampling to 16 kHz mono if needed.
 
         Args:
             duration: Recording duration in seconds (must be positive).
+            stop_event: Optional threading.Event to abort recording early.
 
         Returns:
             np.ndarray: 1D float32 NumPy array at 16,000 Hz.
@@ -257,6 +269,7 @@ class AudioRecorder:
         if duration <= 0:
             raise AudioRecorderError("Recording duration must be positive.")
 
+        self._cancel_event.clear()
         device_idx, dev_info = self.resolve_device(self.device)
         rec_sr, rec_channels, needs_resample = self._determine_recording_parameters(device_idx)
 
@@ -264,6 +277,7 @@ class AudioRecorder:
             print(f"\nRecording for {duration} seconds using [{device_idx}] {dev_info['name']}...")
             print("Speak now!")
 
+            self.is_recording = True
             frames_to_record = int(duration * rec_sr)
             audio = sd.rec(
                 frames_to_record,
@@ -273,6 +287,9 @@ class AudioRecorder:
                 device=device_idx,
             )
             sd.wait()
+
+            if self._cancel_event.is_set() or (stop_event is not None and stop_event.is_set()):
+                return np.array([], dtype=np.float32)
 
             print("Recording completed.")
             audio = np.squeeze(audio)
@@ -294,6 +311,8 @@ class AudioRecorder:
             raise AudioRecorderError(
                 f"Microphone recording failed on [{device_idx}] {dev_info.get('name', 'Unknown')}: {error}"
             ) from error
+        finally:
+            self.is_recording = False
 
     def save_recording(self, audio, filename="recording.wav"):
         """Save NumPy audio data to a WAV file.
@@ -322,7 +341,7 @@ class AudioRecorder:
         self.save_recording(audio, filename)
         return audio
 
-    def record_until_silence(self, max_duration=None, start_timeout=None):
+    def record_until_silence(self, max_duration=None, start_timeout=None, stop_event=None):
         """Record audio dynamically, automatically stopping when the user finishes speaking.
 
         Uses real-time WebRTC Voice Activity Detection (StreamingVAD) to detect speech onset,
@@ -332,14 +351,18 @@ class AudioRecorder:
         Args:
             max_duration: Optional override for maximum recording duration in seconds.
             start_timeout: Optional override for initial speech detection timeout in seconds.
+            stop_event: Optional threading.Event to abort listening/recording immediately.
 
         Returns:
-            np.ndarray: 1D float32 NumPy array at 16,000 Hz, or an empty array if timeout/no speech.
+            np.ndarray: 1D float32 NumPy array at 16,000 Hz, or an empty array if timeout/no speech/cancelled.
         """
         if not self.streaming_vad_enabled:
             fallback_duration = max_duration if max_duration is not None else 5
+            if stop_event is not None:
+                return self.record(duration=fallback_duration, stop_event=stop_event)
             return self.record(duration=fallback_duration)
 
+        self._cancel_event.clear()
         device_idx, dev_info = self.resolve_device(self.device)
         rec_sr, rec_channels, needs_resample = self._determine_recording_parameters(device_idx)
 
@@ -377,6 +400,7 @@ class AudioRecorder:
             print(f"\nListening for speech using [{device_idx}] {dev_info['name']} (Streaming VAD active)...")
 
             speech_detected_logged = False
+            self.is_recording = True
 
             with sd.InputStream(
                 samplerate=rec_sr,
@@ -387,9 +411,16 @@ class AudioRecorder:
                 callback=stream_callback,
             ) as stream:
                 while not vad.is_finished():
+                    if self._cancel_event.is_set() or (stop_event is not None and stop_event.is_set()):
+                        print("Recording cancelled by user.")
+                        return np.array([], dtype=np.float32)
+
                     try:
-                        chunk = audio_queue.get(timeout=0.5)
+                        chunk = audio_queue.get(timeout=0.1)
                     except queue.Empty:
+                        if self._cancel_event.is_set() or (stop_event is not None and stop_event.is_set()):
+                            print("Recording cancelled by user.")
+                            return np.array([], dtype=np.float32)
                         if not stream.active:
                             raise AudioRecorderError("Audio input stream terminated unexpectedly.")
                         continue
@@ -434,3 +465,5 @@ class AudioRecorder:
             raise AudioRecorderError(
                 f"Dynamic microphone recording failed on [{device_idx}] {dev_info.get('name', 'Unknown')}: {error}"
             ) from error
+        finally:
+            self.is_recording = False

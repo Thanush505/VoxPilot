@@ -510,6 +510,10 @@ class WindowManager:
             if target_app_id is not None and info.app_id != target_app_id:
                 continue
 
+            # Skip helper/offscreen worker windows with empty titles when visible_only
+            if visible_only and not info.title.strip():
+                continue
+
             # Title pattern filter
             if regex is not None and not regex.search(info.title):
                 continue

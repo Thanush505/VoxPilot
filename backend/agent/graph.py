@@ -8,6 +8,7 @@ Supports multi-step execution loops, confirmation trust boundaries, and executio
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from typing import Dict, Any, Optional, List
 from langgraph.graph import StateGraph, START, END
@@ -22,6 +23,7 @@ from backend.agent.tool_registry import (
     ToolArgumentValidationError,
 )
 from backend.agent.tool_executor import ToolExecutor
+from backend.agent.rate_limiter import get_shared_rate_limiter
 from backend.automation.confirmation_manager import (
     ConfirmationManager,
     get_shared_confirmation_manager,
@@ -250,9 +252,11 @@ class VoxPilotAgent:
                 "response": "No actionable steps could be generated for this request.",
             }
 
-        if len(plan) > 10:
+        rate_limiter = get_shared_rate_limiter()
+        max_steps = rate_limiter.config.max_steps
+        if len(plan) > max_steps:
             return {
-                "error": f"Plan step count ({len(plan)}) exceeds maximum allowed safety limit of 10.",
+                "error": f"Plan step count ({len(plan)}) exceeds maximum allowed safety limit of {max_steps}.",
                 "execution_status": "validation_failed",
                 "response": "The requested task requires too many steps and was blocked for safety.",
             }
@@ -288,18 +292,20 @@ class VoxPilotAgent:
                     "response": f"Action '{action}' is not permitted or recognized by VoxPilot.",
                 }
 
-            # Validate parameter schemas
-            params = step.get("parameters", {})
+            # Validate and normalize parameter schemas
+            params = dict(step.get("parameters", {}))
             try:
-                self.tool_registry.validate_parameters(action, params)
+                normalized_params = self.tool_registry.normalize_parameters(action, params)
+                self.tool_registry.validate_parameters(action, normalized_params)
+                step_copy = dict(step)
+                step_copy["parameters"] = normalized_params
+                validated_plan.append(step_copy)
             except ToolArgumentValidationError as val_err:
                 return {
                     "error": f"Step {idx} ('{action}') has invalid parameters: {val_err}",
                     "execution_status": "validation_failed",
                     "response": f"Parameters for '{action}' failed validation: {val_err}",
                 }
-
-            validated_plan.append(step)
 
         return {
             "plan": validated_plan,
@@ -366,15 +372,43 @@ class VoxPilotAgent:
                 ),
             }
 
+        # Check execution wall-clock duration budget before step execution
+        rate_limiter = get_shared_rate_limiter()
+        started_at = state.get("started_at")
+        elapsed = (time.time() - started_at) if started_at else 0.0
+        dur_ok, dur_reason = rate_limiter.check_execution_budget(
+            execution_id=state.get("execution_id", ""),
+            elapsed_seconds=elapsed,
+        )
+        if not dur_ok:
+            return {
+                "current_action": plan[current_idx] if current_idx < len(plan) else {},
+                "execution_status": "rate_limited",
+                "error": dur_reason,
+                "response": f"Execution halted: {dur_reason}",
+                "current_execution_result": ExecutionResult(
+                    step_index=current_idx,
+                    action=plan[current_idx].get("action", "unknown") if current_idx < len(plan) else "unknown",
+                    success=False,
+                    status="rate_limited",
+                    message=f"Execution halted: {dur_reason}",
+                    error=dur_reason,
+                ),
+            }
+
         # Check if an approved confirmation token is supplied in state
         override_token = None
         pending_conf = state.get("pending_confirmation")
         if pending_conf and pending_conf.get("step_index") == current_idx:
             override_token = pending_conf.get("token")
 
-        # Execute through ToolExecutor
+        # Execute through ToolExecutor with execution_id and elapsed_duration
+        step_payload = dict(step)
+        step_payload["execution_id"] = state.get("execution_id", "")
+        step_payload["elapsed_duration"] = elapsed
+
         result = self.tool_executor.execute_step(
-            step=step,
+            step=step_payload,
             step_index=current_idx,
             override_confirmation_token=override_token,
         )
@@ -417,6 +451,19 @@ class VoxPilotAgent:
                 "execution_status": "cancelled",
                 "error": f"Emergency stop is active: {reason}",
                 "response": f"Execution halted: emergency stop is active ({reason}).",
+            }
+
+        # 0b. Rate limit or Budget Exceeded -> HALT execution immediately
+        if status == "rate_limited" or result.get("status") == "rate_limited":
+            reason = result.get("error") or result.get("message") or "Execution budget or rate limit exceeded."
+            return {
+                "execution_results": results,
+                "completed_steps": completed,
+                "execution_status": "rate_limited",
+                "error": reason,
+                "response": f"Execution halted due to safety limit: {reason}",
+                "pending_confirmation": None,
+                "needs_replan": False,
             }
 
         # 1. Action requires human confirmation -> PAUSE
@@ -489,6 +536,12 @@ class VoxPilotAgent:
         replan_count = state.get("replan_count", 0)
         max_replans = state.get("max_replans", 2)
         if replan_count >= max_replans:
+            return False
+
+        # Budget Check: verify elapsed wall-clock duration has not exhausted budget
+        rate_limiter = get_shared_rate_limiter()
+        started_at = state.get("started_at")
+        if started_at and (time.time() - started_at) >= rate_limiter.config.max_duration_seconds:
             return False
 
         data = result.get("data") or {}
@@ -598,6 +651,14 @@ class VoxPilotAgent:
                 "response": f"I was unable to complete your request. {err}",
             }
 
+        if status == "rate_limited":
+            if state.get("response"):
+                return {}
+            err = state.get("error", "Rate limit or execution budget exceeded.")
+            return {
+                "response": f"Execution halted due to safety limit: {err}",
+            }
+
         if status == "completed":
             if not results and state.get("response"):
                 # Conversational response
@@ -628,14 +689,14 @@ class VoxPilotAgent:
     def _route_after_validation(self, state: VoxPilotState) -> str:
         """Route to tool execution or response generation based on validation state."""
         status = state.get("execution_status", "")
-        if status in ("validation_failed", "failed", "completed", "cancelled") or state.get("error"):
+        if status in ("validation_failed", "failed", "completed", "cancelled", "rate_limited") or state.get("error"):
             return "generate_response"
         return "execute_tool"
 
     def _route_after_evaluation(self, state: VoxPilotState) -> str:
         """Determine whether to loop to next step, replan, or complete execution."""
         status = state.get("execution_status", "")
-        if status in ("confirmation_required", "failed", "cancelled"):
+        if status in ("confirmation_required", "failed", "cancelled", "rate_limited"):
             return "generate_response"
 
         if state.get("needs_replan"):
@@ -746,6 +807,70 @@ class VoxPilotAgent:
                 logger.warning(f"Failed to persist cancelled state to database: {db_err}")
             return cancelled_state
 
+        # Rate Limiting & Safety Budget Checkpoints
+        rate_limiter = get_shared_rate_limiter()
+        req_allowed, req_reason = rate_limiter.check_request_rate_limit(conversation_id=conv_id)
+        if not req_allowed:
+            logger.warning(f"Rejecting process_request due to rate limit: {req_reason}")
+            rate_limited_state: VoxPilotState = {
+                "user_input": user_input.strip(),
+                "execution_id": exec_id,
+                "conversation_id": conv_id,
+                "conversation_history": "",
+                "execution_status": "rate_limited",
+                "current_step": 0,
+                "plan": [],
+                "execution_results": [],
+                "completed_steps": [],
+                "failed_steps": [],
+                "error": req_reason or "Request rate limit exceeded.",
+                "requires_confirmation": False,
+                "pending_confirmation": None,
+                "replan_count": 0,
+                "max_replans": 2,
+                "needs_replan": False,
+                "replan_reason": None,
+                "replan_history": [],
+                "response": req_reason or "Request rate limit exceeded. Please wait a moment before trying again.",
+            }
+            try:
+                self.repository.save_execution_sync(rate_limited_state)
+            except Exception as db_err:
+                logger.warning(f"Failed to persist rate_limited state to database: {db_err}")
+            return rate_limited_state
+
+        slot_acquired, slot_reason = rate_limiter.acquire_execution_slot(exec_id)
+        if not slot_acquired:
+            logger.warning(f"Rejecting process_request due to concurrency limit: {slot_reason}")
+            concurrent_state: VoxPilotState = {
+                "user_input": user_input.strip(),
+                "execution_id": exec_id,
+                "conversation_id": conv_id,
+                "conversation_history": "",
+                "execution_status": "rate_limited",
+                "current_step": 0,
+                "plan": [],
+                "execution_results": [],
+                "completed_steps": [],
+                "failed_steps": [],
+                "error": slot_reason or "Concurrent execution capacity reached.",
+                "requires_confirmation": False,
+                "pending_confirmation": None,
+                "replan_count": 0,
+                "max_replans": 2,
+                "needs_replan": False,
+                "replan_reason": None,
+                "replan_history": [],
+                "response": slot_reason or "Concurrent execution capacity reached. Please wait for other tasks to complete.",
+            }
+            try:
+                self.repository.save_execution_sync(concurrent_state)
+            except Exception as db_err:
+                logger.warning(f"Failed to persist concurrent rate_limited state to database: {db_err}")
+            return concurrent_state
+
+        rate_limiter.record_request(conversation_id=conv_id)
+
         # Retrieve conversation context
         conv_ctx = self.context_manager.get_context(conv_id)
         conv_summary = conv_ctx.get_summary_text()
@@ -769,6 +894,7 @@ class VoxPilotAgent:
             "needs_replan": False,
             "replan_reason": None,
             "replan_history": [],
+            "started_at": time.time(),
         }
 
         try:
@@ -781,6 +907,8 @@ class VoxPilotAgent:
                 "execution_status": "failed",
                 "response": f"Agent execution failed: {error}",
             }
+        finally:
+            rate_limiter.release_execution_slot(exec_id)
 
         # Update context manager
         try:
@@ -833,6 +961,27 @@ class VoxPilotAgent:
         if not confirmation_token or not confirmation_token.strip():
             raise ValueError("A valid confirmation token is required to resume execution.")
 
+        # Rate Limiting & Safety Budget Checkpoints before Resumption
+        rate_limiter = get_shared_rate_limiter()
+        exec_id = state.get("execution_id", "")
+        started_at = state.get("started_at")
+        elapsed = (time.time() - started_at) if started_at else 0.0
+        dur_ok, dur_reason = rate_limiter.check_execution_budget(exec_id, elapsed_seconds=elapsed)
+        if not dur_ok:
+            logger.warning(f"Resumption rejected due to duration budget: {dur_reason}")
+            rate_limited_resume: VoxPilotState = {
+                **state,
+                "execution_status": "rate_limited",
+                "error": dur_reason or "Execution duration budget exhausted.",
+                "response": f"Resumption blocked: {dur_reason}",
+                "pending_confirmation": None,
+            }
+            try:
+                self.repository.save_execution_sync(rate_limited_resume)
+            except Exception as db_err:
+                logger.warning(f"Failed to persist rate_limited resumed state: {db_err}")
+            return rate_limited_resume
+
         current_idx = state.get("current_step", 0)
         plan = list(state.get("plan", []))
 
@@ -860,6 +1009,7 @@ class VoxPilotAgent:
             },
         }
 
+        rate_limiter.acquire_execution_slot(exec_id)
         try:
             final_state = self.graph.invoke(resumed_state)
         except Exception as error:
@@ -870,6 +1020,8 @@ class VoxPilotAgent:
                 "execution_status": "failed",
                 "response": f"Failed resuming execution: {error}",
             }
+        finally:
+            rate_limiter.release_execution_slot(exec_id)
 
         # Persist resumed state to database
         try:

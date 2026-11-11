@@ -85,3 +85,4 @@ class VoxPilotState(TypedDict, total=False):
     needs_replan: bool
     replan_reason: Optional[str]
     replan_history: List[Dict[str, Any]]
+    started_at: Optional[float]

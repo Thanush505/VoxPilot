@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+build/
 
 # Virtual environments
 .venv/
@@ -36,6 +37,23 @@ models/**/*.onnx.json
 # Logs
 *.log
 
+# Node & Frontend
+node_modules/
+dist/
+dist-ssr/
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.production
+frontend/.env.local
+!.env.example
+!frontend/.env.example
+
 # OS files
 .DS_Store
 Thumbs.db
+
+# Inno Setup output
+installer/Output/
+Output/
+

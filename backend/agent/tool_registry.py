@@ -144,6 +144,163 @@ class ToolDefinition:
 # Tool Registry Implementation
 # ==============================================================================
 
+# Known legacy and natural-language parameter aliases mapped to canonical names.
+# Used by normalize_parameters to deterministically map aliases before Pydantic schema checks.
+PARAMETER_ALIASES: Dict[str, Dict[str, str]] = {
+    "launch_application": {
+        "application": "application_name",
+        "app_name": "application_name",
+        "app": "application_name",
+        "name": "application_name",
+    },
+    "find_windows": {
+        "application": "application_name",
+        "app_name": "application_name",
+        "app": "application_name",
+        "name": "application_name",
+        "title": "title_pattern",
+        "pattern": "title_pattern",
+    },
+    "manage_window": {
+        "application": "application_name",
+        "app_name": "application_name",
+        "app": "application_name",
+        "name": "application_name",
+        "window_handle": "hwnd",
+        "window_id": "hwnd",
+        "handle": "hwnd",
+    },
+    "type_text": {
+        "application": "application_name",
+        "app_name": "application_name",
+        "app": "application_name",
+        "name": "application_name",
+        "string": "text",
+        "message": "text",
+        "content": "text",
+        "typed_text": "text",
+        "window_handle": "hwnd",
+        "window_id": "hwnd",
+        "handle": "hwnd",
+    },
+    "press_key": {
+        "application": "application_name",
+        "app_name": "application_name",
+        "app": "application_name",
+        "name": "application_name",
+        "key_name": "key",
+        "button": "key",
+        "window_handle": "hwnd",
+        "window_id": "hwnd",
+        "handle": "hwnd",
+    },
+    "send_shortcut": {
+        "application": "application_name",
+        "app_name": "application_name",
+        "app": "application_name",
+        "name": "application_name",
+        "keys": "shortcut",
+        "key_combination": "shortcut",
+        "combo": "shortcut",
+        "shortcut_keys": "shortcut",
+        "window_handle": "hwnd",
+        "window_id": "hwnd",
+        "handle": "hwnd",
+    },
+    "search_files": {
+        "search_query": "query",
+        "pattern": "query",
+        "filename": "query",
+        "keyword": "query",
+        "term": "query",
+        "directory": "directory_path",
+        "path": "directory_path",
+        "folder": "directory_path",
+        "folder_path": "directory_path",
+    },
+    "get_file_metadata": {
+        "path": "file_path",
+        "filename": "file_path",
+        "file": "file_path",
+    },
+    "list_directory": {
+        "path": "directory_path",
+        "directory": "directory_path",
+        "folder_path": "directory_path",
+        "folder": "directory_path",
+    },
+    "create_file": {
+        "path": "file_path",
+        "filename": "file_path",
+        "file": "file_path",
+        "text": "content",
+        "data": "content",
+        "body": "content",
+    },
+    "create_folder": {
+        "path": "folder_path",
+        "directory_path": "folder_path",
+        "directory": "folder_path",
+        "folder": "folder_path",
+    },
+    "delete_file": {
+        "path": "file_path",
+        "filename": "file_path",
+        "file": "file_path",
+    },
+    "delete_folder": {
+        "path": "folder_path",
+        "directory_path": "folder_path",
+        "directory": "folder_path",
+        "folder": "folder_path",
+    },
+    "copy_item": {
+        "source": "source_path",
+        "src": "source_path",
+        "from_path": "source_path",
+        "destination": "destination_path",
+        "dest": "destination_path",
+        "dst": "destination_path",
+        "to_path": "destination_path",
+    },
+    "move_item": {
+        "source": "source_path",
+        "src": "source_path",
+        "from_path": "source_path",
+        "destination": "destination_path",
+        "dest": "destination_path",
+        "dst": "destination_path",
+        "to_path": "destination_path",
+    },
+    "rename_item": {
+        "source": "source_path",
+        "path": "source_path",
+        "file_path": "source_path",
+        "target": "source_path",
+        "src": "source_path",
+        "new_path": "new_name",
+        "destination": "new_name",
+        "name": "new_name",
+    },
+    "navigate_url": {
+        "link": "url",
+        "address": "url",
+        "target_url": "url",
+    },
+    "enter_text": {
+        "locator": "selector",
+        "target": "selector",
+        "value": "text",
+        "string": "text",
+        "content": "text",
+    },
+    "click_element": {
+        "locator": "selector",
+        "target": "selector",
+    },
+}
+
+
 class ToolRegistry:
     """Central registry of approved desktop, browser, filesystem, and system tools."""
 
@@ -192,20 +349,75 @@ class ToolRegistry:
         canonical = self.resolve_name(name)
         return self._tools[canonical]
 
+    def normalize_parameters(self, name: str, parameters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Safely normalize known parameter aliases to canonical parameter names.
+
+        Rejects ambiguous or conflicting parameter combinations.
+        Never silently discards required parameters.
+        """
+        if name in ("respond", "ask_clarification"):
+            return dict(parameters) if parameters is not None else {}
+        canonical_name = self.resolve_name(name)
+        params = dict(parameters) if parameters is not None else {}
+        tool_aliases = PARAMETER_ALIASES.get(canonical_name, {})
+        if not tool_aliases:
+            return params
+
+        # Group aliases by canonical parameter
+        canonical_to_aliases: Dict[str, List[str]] = {}
+        for alias, canon in tool_aliases.items():
+            canonical_to_aliases.setdefault(canon, []).append(alias)
+
+        normalized = dict(params)
+        for canon_param, aliases in canonical_to_aliases.items():
+            found_aliases = [a for a in aliases if a in normalized]
+            has_canon = canon_param in normalized
+
+            if has_canon and found_aliases:
+                # Both canonical and alias provided. Check for conflicting values!
+                canon_val = normalized[canon_param]
+                for a in found_aliases:
+                    alias_val = normalized[a]
+                    if alias_val != canon_val:
+                        raise ToolArgumentValidationError(
+                            f"Conflicting/ambiguous parameters for action '{canonical_name}': "
+                            f"canonical '{canon_param}' ({canon_val!r}) and alias '{a}' ({alias_val!r}) have different values."
+                        )
+                    # If values match, safely delete alias
+                    del normalized[a]
+            elif not has_canon and found_aliases:
+                # Canonical not provided, but one or more aliases provided.
+                first_alias = found_aliases[0]
+                first_val = normalized[first_alias]
+                for other in found_aliases[1:]:
+                    if normalized[other] != first_val:
+                        raise ToolArgumentValidationError(
+                            f"Conflicting/ambiguous aliases for action '{canonical_name}': "
+                            f"'{first_alias}' ({first_val!r}) and '{other}' ({normalized[other]!r}) have different values."
+                        )
+                    del normalized[other]
+                del normalized[first_alias]
+                normalized[canon_param] = first_val
+
+        return normalized
+
     def validate_parameters(self, name: str, parameters: Optional[Dict[str, Any]] = None) -> BaseModel:
         """Validate argument dictionary against tool's Pydantic schema.
 
         Rejects unsupported extra parameters and malformed types.
         """
         tool_def = self.get_tool(name)
-        params = parameters if parameters is not None else {}
+        raw_params = parameters if parameters is not None else {}
 
-        if not isinstance(params, dict):
+        if not isinstance(raw_params, dict):
             raise ToolArgumentValidationError(
-                f"Parameters for action '{name}' must be a dictionary, received {type(params).__name__}."
+                f"Parameters for action '{name}' must be a dictionary, received {type(raw_params).__name__}."
             )
 
-        # Enforce that no unknown or unsupported parameters were injected
+        # 1. Normalize known aliases safely
+        params = self.normalize_parameters(name, raw_params)
+
+        # 2. Enforce that no unknown or unsupported parameters were injected
         schema_fields: Set[str] = set(tool_def.input_schema.model_fields.keys())
         unknown_fields = set(params.keys()) - schema_fields
         if unknown_fields:

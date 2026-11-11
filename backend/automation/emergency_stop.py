@@ -164,6 +164,11 @@ class EmergencyStopManager:
         with self._lock:
             return self._triggered_at
 
+    @property
+    def reset_at(self) -> Optional[float]:
+        with self._lock:
+            return self._reset_at
+
     def register_cleanup_callback(self, callback: Callable[[], None]) -> None:
         """Register a callback to be invoked immediately upon emergency stop trigger."""
         with self._lock:
@@ -281,30 +286,36 @@ class EmergencyStopManager:
     def reset_emergency_stop(self, force: bool = False) -> Dict[str, Any]:
         """Explicitly reset the emergency stop state to allow automation to resume.
 
-        Requires that all tracked operations have terminated cleanly, unless force=True.
+        Requires that all tracked operations have terminated cleanly and been unregistered.
+        Unrestricted forced resets without evidence are strictly disallowed.
         Does NOT resume previously interrupted executions.
         """
+        if force:
+            raise UnsafeResetError(
+                "Unrestricted 'force=True' reset has been removed for safety. "
+                "Use operator_emergency_recovery() with verified operator justification and termination evidence."
+            )
+
         with self._lock:
             if not self._is_active:
                 return self.get_emergency_stop_status()
 
-            # Safety check: Verify no active operations are still running
-            running_ops = [
+            # Safety check: Verify no operations remain registered or in-flight
+            active_ops = [
                 op.operation_id for op in self._active_operations.values()
                 if op.status in ("running", "stopping")
             ]
-            if running_ops and not force:
-                raise UnsafeResetError(
-                    f"Cannot reset emergency stop: {len(running_ops)} active operations have not reached "
-                    f"a confirmed safe terminal state ({', '.join(running_ops[:3])}). "
-                    f"Wait for operations to terminate or specify force=True.",
-                    active_count=len(running_ops),
-                    active_operations=running_ops,
-                )
+            if not active_ops and self._active_operations:
+                active_ops = list(self._active_operations.keys())
 
-            # Clear any remaining operation records if forcing
-            if force:
-                self._active_operations.clear()
+            if active_ops:
+                raise UnsafeResetError(
+                    f"Cannot reset emergency stop: {len(active_ops)} active operations have not reached "
+                    f"a confirmed safe terminal state ({', '.join(active_ops[:3])}). "
+                    f"Wait for operations to terminate cleanly or use operator_emergency_recovery().",
+                    active_count=len(active_ops),
+                    active_operations=active_ops,
+                )
 
             self._is_active = False
             self._reset_at = time.time()
@@ -313,6 +324,85 @@ class EmergencyStopManager:
             logger.info("Emergency stop has been explicitly reset. Automation is re-enabled.")
 
         # Ensure input release upon reset to guarantee clean baseline
+        release_system_inputs()
+
+        return self.get_emergency_stop_status()
+
+    def operator_emergency_recovery(
+        self,
+        operator_justification: str,
+        confirmed_terminated_operations: List[str],
+        verification_evidence: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Authorized operator procedure to recover from emergency stop with verified operation termination.
+
+        Requires:
+        1. A detailed operator justification (minimum 10 characters).
+        2. Explicit verification of all currently active operations in confirmed_terminated_operations.
+        3. Optional process verification: if verification_evidence provides process IDs (pids),
+           confirms that each process is terminated. Rejects if a target process is still active.
+
+        Never clears records merely because of elapsed time or stale status.
+        Never auto-resumes interrupted executions.
+        """
+        if not operator_justification or len(operator_justification.strip()) < 10:
+            raise ValueError(
+                "Operator justification is required and must be at least 10 characters "
+                "describing the verified physical or system state."
+            )
+
+        with self._lock:
+            if not self._is_active:
+                return self.get_emergency_stop_status()
+
+            current_active_ids = set(self._active_operations.keys())
+            confirmed_set = set(confirmed_terminated_operations or [])
+
+            # Safety check: every active operation must be explicitly verified and accounted for
+            unaccounted = current_active_ids - confirmed_set
+            if unaccounted:
+                raise UnsafeResetError(
+                    f"Operator recovery rejected: {len(unaccounted)} active operations are not accounted for "
+                    f"in confirmed_terminated_operations: {list(unaccounted)[:5]}. "
+                    f"All registered operations must be explicitly verified.",
+                    active_count=len(unaccounted),
+                    active_operations=list(unaccounted),
+                )
+
+            # Verification evidence checking (e.g. process liveness via psutil)
+            if verification_evidence:
+                pids_to_check = verification_evidence.get("pids") or []
+                if isinstance(pids_to_check, int):
+                    pids_to_check = [pids_to_check]
+                for pid in pids_to_check:
+                    try:
+                        import psutil
+                        if psutil.pid_exists(pid):
+                            proc = psutil.Process(pid)
+                            if proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE:
+                                raise UnsafeResetError(
+                                    f"Operator recovery rejected: Process with PID {pid} is still actively running. "
+                                    "Target process must be terminated before emergency recovery.",
+                                    active_count=1,
+                                    active_operations=list(current_active_ids),
+                                )
+                    except (ImportError, psutil.NoSuchProcess):
+                        pass
+
+            # Safely clear confirmed operations
+            for op_id in confirmed_set:
+                self._active_operations.pop(op_id, None)
+
+            self._is_active = False
+            self._reset_at = time.time()
+            self._trigger_reason = None
+            self._trigger_source = None
+            logger.warning(
+                f"Operator emergency recovery completed. Justification: '{operator_justification.strip()}'. "
+                f"Cleared operations: {list(confirmed_set)}."
+            )
+
+        # Ensure low-level inputs are released
         release_system_inputs()
 
         return self.get_emergency_stop_status()

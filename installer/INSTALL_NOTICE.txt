@@ -1,0 +1,37 @@
+Welcome to VoxPilot - Your Personal AI Desktop Control Agent
+
+IMPORTANT FIRST-RUN SETUP INFORMATION
+================================================================================
+
+1. Persistent User Data Isolation:
+   VoxPilot stores your persistent SQLite task database, conversation history,
+   audit trail exports, screenshots, and application logs in:
+   %LOCALAPPDATA%\VoxPilot
+   
+   This data is stored separately from the program binaries and is safely
+   preserved across updates and uninstalls.
+
+2. External Dependencies:
+   - Ollama LLM Service:
+     VoxPilot requires local Ollama for natural language planning.
+     Download and install Ollama from https://ollama.com.
+     Start the daemon with: ollama serve
+     Pull the planning model with: ollama pull qwen3:4b
+
+   - Playwright Chromium Browser:
+     To enable web automation, install Chromium using the bundled tool.
+     Run "Install Playwright Browser" from the Start Menu or launch
+     "install_browser.bat" in the application folder.
+
+3. Built-In Speech Engines:
+   - Piper Neural TTS voice model is included and ready to use.
+   - Faster-Whisper base model will download automatically from Hugging Face
+     on first speech recognition (~140 MB).
+
+4. Safety & Emergency Controls:
+   - Global Emergency Stop: Press Ctrl + Alt + Escape anywhere in Windows
+     to immediately abort all active automation and release inputs.
+   - Consequential operations (file deletion, browser form submission)
+     require deliberate human confirmation in the dashboard.
+================================================================================
+
