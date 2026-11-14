@@ -943,12 +943,12 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isBackendConnected }
 
           <span
             className={`status-pill ${updateStatus?.state === 'ready_to_install' || updateStatus?.state === 'up_to_date'
-                ? 'success'
-                : updateStatus?.update_available
-                  ? 'warning'
-                  : updateStatus?.state === 'failed' || updateStatus?.state === 'offline'
-                    ? 'danger'
-                    : 'inactive'
+              ? 'success'
+              : updateStatus?.update_available
+                ? 'warning'
+                : updateStatus?.state === 'failed' || updateStatus?.state === 'offline'
+                  ? 'danger'
+                  : 'inactive'
               }`}
           >
             {updateStatus?.state === 'checking'
@@ -967,7 +967,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isBackendConnected }
                           ? 'Offline'
                           : updateStatus?.state === 'failed'
                             ? 'Update Error'
-                            : `Installed v${updateStatus?.installed_version || '0.5.0'}`}
+                            : `Installed v${updateStatus?.installed_version || '...'}`}
           </span>
         </div>
 
@@ -979,7 +979,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isBackendConnected }
                 <ShieldCheck size={14} />
               </div>
               <div className="metric-box-value" style={{ fontSize: '18px' }}>
-                v{updateStatus?.installed_version || '0.5.0'}
+                v{updateStatus?.installed_version || '...'}
               </div>
               <div className="metric-box-footer">
                 Repository: {updateStatus?.release_repo || 'Thanush505/VoxPilot'}
@@ -1138,6 +1138,65 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isBackendConnected }
             <div className="panel-error-alert">
               <AlertTriangle size={16} />
               <span>{updateStatus.error_message}</span>
+            </div>
+          )}
+
+          {updateStatus?.last_install_result && (
+            <div className="update-release-notes-box" style={{ marginTop: '10px' }}>
+              <div className="update-release-notes-header">
+                <span>
+                  <strong>Last Update Diagnostics</strong>{' '}
+                  &bull; Status:{' '}
+                  <span style={{ textTransform: 'capitalize' }}>
+                    {updateStatus.last_install_result.status}
+                  </span>
+                </span>
+                {updateStatus.last_install_result.session_id && (
+                  <code style={{ fontSize: '11px' }}>
+                    {updateStatus.last_install_result.session_id}
+                  </code>
+                )}
+              </div>
+              <div style={{ padding: '10px 12px', fontSize: '12px', lineHeight: 1.5 }}>
+                <div>
+                  <strong>Version Transition:</strong>{' '}
+                  v{updateStatus.last_install_result.previous_version || '?'} &rarr; v
+                  {updateStatus.last_install_result.target_version}
+                  {updateStatus.last_install_result.installed_version &&
+                    ` (Verified: v${updateStatus.last_install_result.installed_version})`}
+                </div>
+                <div>
+                  <strong>Installer Exit Code:</strong>{' '}
+                  {updateStatus.last_install_result.exit_code ?? 'pending'} &bull;{' '}
+                  <strong>Restart:</strong>{' '}
+                  {updateStatus.last_install_result.restart_result ||
+                    (updateStatus.last_install_result.relaunched ? 'relaunched' : 'not_relaunched')}
+                </div>
+                {updateStatus.last_install_result.backend_health && (
+                  <div>
+                    <strong>Backend Health:</strong>{' '}
+                    {updateStatus.last_install_result.backend_health.ok
+                      ? `Healthy (v${updateStatus.last_install_result.backend_health.version || ''})`
+                      : `Failed (${updateStatus.last_install_result.backend_health.error || 'unhealthy'})`}
+                  </div>
+                )}
+                {(updateStatus.last_install_result.session_log ||
+                  updateStatus.last_install_result.installer_log) && (
+                  <div style={{ wordBreak: 'break-all' }}>
+                    <strong>Diagnostic Logs:</strong>{' '}
+                    <code>
+                      {updateStatus.last_install_result.session_log ||
+                        updateStatus.last_install_result.installer_log}
+                    </code>
+                  </div>
+                )}
+                {updateStatus.last_install_result.recovery_hint && (
+                  <div style={{ marginTop: '6px', color: '#f59e0b' }}>
+                    <strong>Recovery Guidance:</strong>{' '}
+                    {updateStatus.last_install_result.recovery_hint}
+                  </div>
+                )}
+              </div>
             </div>
           )}
 

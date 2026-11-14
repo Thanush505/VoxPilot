@@ -124,13 +124,14 @@ class _FakeHttpResponse:
 # ==============================================================================
 
 def test_centralized_app_version_retrieval() -> None:
+    expected_version = (Path(__file__).resolve().parent.parent / "VERSION").read_text(encoding="utf-8").strip()
     version = get_app_version()
     parsed = parse_semver(version)
-    assert version == "0.5.0"
-    assert parsed.major == 0
-    assert parsed.minor == 5
-    assert parsed.patch == 0
-    assert not parsed.is_prerelease
+    expected_parsed = parse_semver(expected_version)
+    assert version == expected_parsed.normalized
+    assert parsed.major == expected_parsed.major
+    assert parsed.minor == expected_parsed.minor
+    assert parsed.patch == expected_parsed.patch
 
 
 def test_semantic_version_parsing_and_comparison() -> None:
@@ -648,4 +649,349 @@ def test_external_updater_simulated_upgrade_and_user_data_preservation(tmp_path:
     assert update_cfg.read_text(encoding="utf-8") == '{"auto_check_enabled": true, "channel": "stable"}'
     assert log_file.read_text(encoding="utf-8") == "[2026-11-11] INFO: User session log entry\n"
     assert export_file.read_text(encoding="utf-8") == '{"records": [{"id": 1}]}'
+
+
+# ==============================================================================
+# 7. Post-Install Verification, Failure Handling, & Restart Safety Tests
+# ==============================================================================
+
+def _setup_isolated_install(tmp_path: Path, initial_version: str = "0.5.0", internal_layout: bool = False):
+    install_dir = tmp_path / "Programs" / "VoxPilot"
+    install_dir.mkdir(parents=True)
+    exe_path = install_dir / "VoxPilot.exe"
+    exe_path.write_bytes(b"MZ-VOXPILOT-EXE")
+    if internal_layout:
+        (install_dir / "_internal").mkdir(parents=True)
+        version_file = install_dir / "_internal" / "VERSION"
+    else:
+        version_file = install_dir / "VERSION"
+    version_file.write_text(f"{initial_version}\n", encoding="utf-8")
+
+    updates_dir = tmp_path / "LocalAppData" / "VoxPilot" / "updates"
+    updates_dir.mkdir(parents=True)
+    installer_path = updates_dir / "VoxPilot-Setup-0.5.1.exe"
+    installer_bytes, installer_sha = _make_fake_installer_bytes("0.5.1")
+    installer_path.write_bytes(installer_bytes)
+    result_file = updates_dir / "update_install_result.json"
+    return install_dir, exe_path, version_file, updates_dir, installer_path, installer_sha, result_file
+
+
+def test_external_updater_relaunch_only_after_exe_and_internal_version_verified(tmp_path: Path) -> None:
+    """Relaunch must happen ONLY after executable and _internal/VERSION match target_version."""
+    install_dir, exe_path, version_file, updates_dir, installer_path, sha, result_file = _setup_isolated_install(
+        tmp_path, initial_version="0.5.0", internal_layout=True
+    )
+
+    def _mock_run(cmd, **kwargs):
+        version_file.write_text("0.5.1\n", encoding="utf-8")
+        completed = MagicMock()
+        completed.returncode = 0
+        return completed
+
+    with (
+        patch("backend.updater.updater_runner.subprocess.run", side_effect=_mock_run),
+        patch("backend.updater.updater_runner.subprocess.Popen") as mock_popen,
+    ):
+        res = execute_external_update(
+            installer_path=installer_path,
+            expected_sha256=sha,
+            target_version="0.5.1",
+            result_file=result_file,
+            install_dir=install_dir,
+            relaunch_exe=exe_path,
+            relaunch=True,
+        )
+
+    assert res["status"] == "completed"
+    assert res["exit_code"] == 0
+    assert res["installed_version"] == "0.5.1"
+    assert res["relaunched"] is True
+    mock_popen.assert_called_once()
+    assert (updates_dir / "updater_runner.log").is_file()
+
+
+def test_external_updater_fails_on_installer_nonzero_exit_without_relaunch(tmp_path: Path) -> None:
+    """Non-zero installer exit code must fail, preserve logs, and NEVER relaunch."""
+    install_dir, exe_path, version_file, updates_dir, installer_path, sha, result_file = _setup_isolated_install(
+        tmp_path, initial_version="0.5.0"
+    )
+
+    completed = MagicMock()
+    completed.returncode = 5
+
+    with (
+        patch("backend.updater.updater_runner.subprocess.run", return_value=completed),
+        patch("backend.updater.updater_runner.subprocess.Popen") as mock_popen,
+    ):
+        res = execute_external_update(
+            installer_path=installer_path,
+            expected_sha256=sha,
+            target_version="0.5.1",
+            result_file=result_file,
+            install_dir=install_dir,
+            relaunch_exe=exe_path,
+            relaunch=True,
+        )
+
+    assert res["status"] == "failed"
+    assert res["exit_code"] == 5
+    assert res["relaunched"] is False
+    mock_popen.assert_not_called()
+    assert (updates_dir / "updater_runner.log").is_file()
+
+
+def test_external_updater_fails_on_process_exit_timeout_without_running_installer(tmp_path: Path) -> None:
+    """Timeout waiting for old process must abort with -4, not run installer, and not relaunch."""
+    install_dir, exe_path, version_file, updates_dir, installer_path, sha, result_file = _setup_isolated_install(
+        tmp_path, initial_version="0.5.0"
+    )
+
+    with (
+        patch("backend.updater.updater_runner.wait_for_process_exit", return_value=False),
+        patch("backend.updater.updater_runner.subprocess.run") as mock_run,
+        patch("backend.updater.updater_runner.subprocess.Popen") as mock_popen,
+    ):
+        res = execute_external_update(
+            installer_path=installer_path,
+            expected_sha256=sha,
+            target_version="0.5.1",
+            result_file=result_file,
+            wait_pid=99999,
+            wait_timeout=0.5,
+            install_dir=install_dir,
+            relaunch_exe=exe_path,
+            relaunch=True,
+        )
+
+    assert res["status"] == "failed"
+    assert res["exit_code"] == -4
+    assert res["relaunched"] is False
+    mock_run.assert_not_called()
+    mock_popen.assert_not_called()
+
+
+def test_external_updater_fails_when_target_executable_missing_after_install(tmp_path: Path) -> None:
+    """Missing VoxPilot.exe after installer returns 0 must fail with -6 and not relaunch."""
+    install_dir, exe_path, version_file, updates_dir, installer_path, sha, result_file = _setup_isolated_install(
+        tmp_path, initial_version="0.5.0"
+    )
+
+    def _mock_run(cmd, **kwargs):
+        exe_path.unlink()
+        version_file.write_text("0.5.1\n", encoding="utf-8")
+        completed = MagicMock()
+        completed.returncode = 0
+        return completed
+
+    with (
+        patch("backend.updater.updater_runner.subprocess.run", side_effect=_mock_run),
+        patch("backend.updater.updater_runner.subprocess.Popen") as mock_popen,
+    ):
+        res = execute_external_update(
+            installer_path=installer_path,
+            expected_sha256=sha,
+            target_version="0.5.1",
+            result_file=result_file,
+            install_dir=install_dir,
+            relaunch_exe=exe_path,
+            relaunch=True,
+        )
+
+    assert res["status"] == "failed"
+    assert res["exit_code"] == -6
+    assert res["relaunched"] is False
+    mock_popen.assert_not_called()
+
+
+def test_external_updater_fails_when_installed_version_mismatch_without_relaunch(tmp_path: Path) -> None:
+    """If installed VERSION stays 0.5.0 instead of 0.5.1, fail with -7 and do NOT relaunch."""
+    install_dir, exe_path, version_file, updates_dir, installer_path, sha, result_file = _setup_isolated_install(
+        tmp_path, initial_version="0.5.0"
+    )
+
+    completed = MagicMock()
+    completed.returncode = 0
+
+    with (
+        patch("backend.updater.updater_runner.subprocess.run", return_value=completed),
+        patch("backend.updater.updater_runner.subprocess.Popen") as mock_popen,
+    ):
+        res = execute_external_update(
+            installer_path=installer_path,
+            expected_sha256=sha,
+            target_version="0.5.1",
+            result_file=result_file,
+            install_dir=install_dir,
+            relaunch_exe=exe_path,
+            relaunch=True,
+        )
+
+    assert res["status"] == "failed"
+    assert res["exit_code"] == -7
+    assert res["installed_version"] == "0.5.0"
+    assert res["relaunched"] is False
+    assert "expected v0.5.1" in res["error"]
+    mock_popen.assert_not_called()
+
+
+def test_powershell_updater_script_quotes_paths_and_verifies_version(tmp_path: Path) -> None:
+    """Generated PS script must quote paths with spaces, write UTF-8 no-BOM, and verify VERSION."""
+    install_dir = tmp_path / "Program Files" / "VoxPilot"
+    updates_dir = tmp_path / "Local App Data" / "VoxPilot" / "updates"
+    script = generate_powershell_updater_script(
+        script_path=updates_dir / "run_voxpilot_updater.ps1",
+        installer_path=updates_dir / "VoxPilot-Setup-0.5.1.exe",
+        expected_sha256="a" * 64,
+        target_version="0.5.1",
+        result_file=updates_dir / "update_install_result.json",
+        wait_pid=1234,
+        install_dir=install_dir,
+        relaunch_exe=install_dir / "VoxPilot.exe",
+        relaunch=True,
+    )
+    content = script.read_text(encoding="utf-8")
+    assert '"/DIR=`"$InstallDir`""' in content
+    assert '"/LOG=`"$LogFile`""' in content
+    assert "Resolve-InstalledVersion" in content
+    assert "UTF8Encoding $false" in content
+    assert "_internal" in content
+
+
+def test_update_service_surfaces_previous_install_failure_and_reads_bom_json(tmp_path: Path) -> None:
+    """UpdateService must parse BOM-encoded result JSON and surface failed install status."""
+    settings_mgr = UpdateSettingsManager(config_path=tmp_path / "update_settings.json")
+    updates_dir = tmp_path / "updates"
+    updates_dir.mkdir(parents=True)
+    result_file = updates_dir / "update_install_result.json"
+    result_payload = json.dumps({
+        "status": "failed",
+        "target_version": "0.5.1",
+        "installed_version": "0.5.0",
+        "exit_code": -7,
+        "error": "Post-install version verification failed: expected v0.5.1, found v0.5.0.",
+    })
+    # Write with UTF-8 BOM to simulate PowerShell 5.1 Set-Content behavior
+    result_file.write_bytes(b"\xef\xbb\xbf" + result_payload.encode("utf-8"))
+
+    svc = UpdateService(settings_manager=settings_mgr, updates_dir=updates_dir, installed_version="0.5.0")
+    status = svc.get_status()
+    assert status["last_install_result"]["status"] == "failed"
+    assert status["error_code"] == "install_failed"
+    assert "expected v0.5.1" in status["error_message"]
+
+
+def test_trigger_install_aborts_if_powershell_crashes_immediately(tmp_path: Path) -> None:
+    """If detached PowerShell updater exits immediately with error, trigger_install must fail without exiting app."""
+    settings_mgr = UpdateSettingsManager(config_path=tmp_path / "update_settings.json")
+    updates_dir = tmp_path / "updates"
+    updates_dir.mkdir(parents=True)
+    installer_path = updates_dir / "VoxPilot-Setup-0.5.1.exe"
+    installer_bytes, sha = _make_fake_installer_bytes("0.5.1")
+    installer_path.write_bytes(installer_bytes)
+
+    svc = UpdateService(settings_manager=settings_mgr, updates_dir=updates_dir, installed_version="0.5.0")
+    svc._state = "ready_to_install"
+    svc._latest_version = "0.5.1"
+    svc._expected_sha256 = sha
+    svc._sha256_verified = True
+    svc._downloaded_installer_path = installer_path
+
+    mock_proc = MagicMock()
+    mock_proc.poll.return_value = 1
+
+    with patch("backend.updater.update_service.subprocess.Popen", return_value=mock_proc):
+        with pytest.raises(UpdateError, match="exited immediately with code 1"):
+            svc.trigger_install(confirm=True, relaunch=True, shutdown_app=True)
+
+    assert svc._state == "failed"
+    assert svc._error_code == "updater_launch_failed"
+    assert (updates_dir / "updater_bootstrap.log").is_file()
+
+
+def test_external_updater_verifies_backend_health_and_writes_session_log(tmp_path: Path) -> None:
+    """Relaunch must verify /health reports expected version and write structured session log."""
+    install_dir, exe_path, version_file, updates_dir, installer_path, sha, result_file = _setup_isolated_install(
+        tmp_path, initial_version="0.5.0"
+    )
+    logs_dir = tmp_path / "LocalAppData" / "VoxPilot" / "logs"
+
+    def _mock_run(cmd, **kwargs):
+        version_file.write_text("0.5.1\n", encoding="utf-8")
+        completed = MagicMock()
+        completed.returncode = 0
+        return completed
+
+    with (
+        patch("backend.updater.updater_runner.subprocess.run", side_effect=_mock_run),
+        patch("backend.updater.updater_runner.subprocess.Popen") as mock_popen,
+        patch(
+            "backend.updater.updater_runner.verify_backend_health",
+            return_value={"ok": True, "url": "http://127.0.0.1:8000/health", "status": "healthy", "version": "0.5.1", "error": None},
+        ),
+    ):
+        res = execute_external_update(
+            installer_path=installer_path,
+            expected_sha256=sha,
+            target_version="0.5.1",
+            result_file=result_file,
+            install_dir=install_dir,
+            relaunch_exe=exe_path,
+            relaunch=True,
+            session_id="test_sess_001",
+            previous_version="0.5.0",
+            logs_dir=logs_dir,
+            health_url="http://127.0.0.1:8000/health",
+        )
+
+    assert res["status"] == "completed"
+    assert res["session_id"] == "test_sess_001"
+    assert res["previous_version"] == "0.5.0"
+    assert res["restart_result"] == "relaunched_and_verified"
+    assert res["backend_health"]["ok"] is True
+    mock_popen.assert_called_once()
+    session_log = logs_dir / "update_test_sess_001.log"
+    assert session_log.is_file()
+    assert "Verified installed VERSION=0.5.1" in session_log.read_text(encoding="utf-8")
+
+
+def test_external_updater_fails_when_backend_health_reports_old_version(tmp_path: Path) -> None:
+    """If relaunched /health reports old version or fails, update must fail with -9 and recovery hint."""
+    install_dir, exe_path, version_file, updates_dir, installer_path, sha, result_file = _setup_isolated_install(
+        tmp_path, initial_version="0.5.0"
+    )
+    logs_dir = tmp_path / "LocalAppData" / "VoxPilot" / "logs"
+
+    def _mock_run(cmd, **kwargs):
+        version_file.write_text("0.5.1\n", encoding="utf-8")
+        completed = MagicMock()
+        completed.returncode = 0
+        return completed
+
+    with (
+        patch("backend.updater.updater_runner.subprocess.run", side_effect=_mock_run),
+        patch("backend.updater.updater_runner.subprocess.Popen"),
+        patch(
+            "backend.updater.updater_runner.verify_backend_health",
+            return_value={"ok": False, "url": "http://127.0.0.1:8000/health", "status": "unreachable", "version": "0.5.0", "error": "Version mismatch"},
+        ),
+    ):
+        res = execute_external_update(
+            installer_path=installer_path,
+            expected_sha256=sha,
+            target_version="0.5.1",
+            result_file=result_file,
+            install_dir=install_dir,
+            relaunch_exe=exe_path,
+            relaunch=True,
+            session_id="test_sess_fail",
+            previous_version="0.5.0",
+            logs_dir=logs_dir,
+            health_url="http://127.0.0.1:8000/health",
+        )
+
+    assert res["status"] == "failed"
+    assert res["exit_code"] == -9
+    assert res["restart_result"] == "health_check_failed"
+    assert res["recovery_hint"] is not None
+    assert (logs_dir / "update_test_sess_fail.log").is_file()
 

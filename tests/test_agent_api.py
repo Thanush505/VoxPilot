@@ -69,11 +69,12 @@ def create_test_agent(
 
 def test_root_endpoint(client: TestClient):
     """Verify service root returns metadata and online status."""
+    from backend.version import get_app_version
     res = client.get("/")
     assert res.status_code == 200
     data = res.json()
     assert data["status"] == "online"
-    assert data["version"] in ("0.4.0", "0.5.0")
+    assert data["version"] == get_app_version()
 
 
 def test_health_check_endpoint(client: TestClient):

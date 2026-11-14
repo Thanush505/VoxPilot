@@ -20,15 +20,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
   emergencyStatus,
 }) => {
   const isEmergencyActive = emergencyStatus?.is_active ?? false;
-  const [appVersion, setAppVersion] = useState<string>('0.5.0');
+  const [appVersion, setAppVersion] = useState<string>('');
 
   useEffect(() => {
     let mounted = true;
     apiClient
       .getVersion()
-      .then((res) => {
+      .then(async (res) => {
         if (mounted && res.ok && res.data?.installed_version) {
           setAppVersion(res.data.installed_version);
+          return;
+        }
+        const health = await apiClient.getHealth();
+        if (mounted && health.ok && health.data?.version) {
+          setAppVersion(health.data.version);
         }
       })
       .catch(() => { });
@@ -105,8 +110,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
 
           <div className="version-info">
-            <span>VoxPilot v{appVersion}</span>
-            <span>API v{appVersion}</span>
+            <span>VoxPilot v{appVersion || '...'}</span>
+            <span>API v{appVersion || '...'}</span>
           </div>
         </div>
       </aside>

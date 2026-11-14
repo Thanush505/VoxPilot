@@ -21,6 +21,10 @@ DEFAULT_VAD_THRESHOLD = 0.5
 DEFAULT_VAD_MIN_SPEECH_DURATION_MS = 250
 DEFAULT_VAD_MIN_SILENCE_DURATION_MS = 500
 DEFAULT_VAD_SPEECH_PAD_MS = 200
+DEFAULT_STT_INITIAL_PROMPT = (
+    "VoxPilot desktop voice commands: Open WhatsApp, Google Chrome, Visual Studio Code, "
+    "Calculator, Notepad, Spotify, Discord, File Explorer, Windows Settings, Task Manager."
+)
 
 
 class SpeechToTextError(Exception):
@@ -63,6 +67,10 @@ class SpeechToText:
         self.compute_type = compute_type
         self.language = language
         self.preprocessor = preprocessor if preprocessor is not None else AudioPreprocessor()
+        self.initial_prompt = (
+            os.environ.get("VOXPILOT_STT_INITIAL_PROMPT", "").strip()
+            or DEFAULT_STT_INITIAL_PROMPT
+        )
 
         # VAD Configuration
         if vad_enabled is None:
@@ -190,6 +198,7 @@ class SpeechToText:
                 processed_audio.astype(np.float32),
                 beam_size=5,
                 language=self.language,
+                initial_prompt=self.initial_prompt,
                 vad_filter=self.vad_enabled,
                 vad_parameters=vad_params,
             )

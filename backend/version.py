@@ -1,4 +1,4 @@
-﻿"""
+"""
 VoxPilot - Centralized Application Version Authority & Semantic Version Utilities
 Provides the single source of truth for the installed VoxPilot version across
 the FastAPI backend, standalone launcher, update service, and frontend UI.
@@ -13,7 +13,7 @@ from typing import List, Optional, Tuple, Union
 
 from backend.paths import get_bundle_dir, get_executable_dir, get_project_root, is_frozen
 
-DEFAULT_APP_VERSION = "0.5.1"
+DEFAULT_APP_VERSION = "0.5.2"
 
 # Strict semantic version regex: optional leading 'v' or 'V', major.minor.patch,
 # optional pre-release (-alpha.1, -beta.2, -rc.1) and optional build metadata (+build.123)
@@ -180,25 +180,44 @@ def is_newer_version(installed_version: str, candidate_version: str, allow_prere
 
 def get_version_file_candidates() -> List[Path]:
     """Return ordered candidate locations for the canonical VERSION file."""
-    candidates: List[Path] = []
     if is_frozen():
-        candidates.append(get_bundle_dir() / "VERSION")
-        candidates.append(get_executable_dir() / "VERSION")
-    candidates.append(get_project_root() / "VERSION")
-    return candidates
+        return [
+            get_bundle_dir() / "VERSION",
+            get_executable_dir() / "VERSION",
+        ]
+    return [get_project_root() / "VERSION"]
 
 
 def get_app_version() -> str:
-    """Read and return the canonical installed VoxPilot version string."""
+    """Read and return the canonical installed VoxPilot version string.
+
+    In development mode, reads <project_root>/VERSION directly.
+    In frozen mode, inspects bundled/executable VERSION files and prevents
+    stale older VERSION files from overriding the compiled build version.
+    """
+    compiled_ver = try_parse_semver(DEFAULT_APP_VERSION)
+    best_ver: Optional[SemanticVersion] = None
+
     for candidate in get_version_file_candidates():
         try:
             if candidate.is_file():
-                content = candidate.read_text(encoding="utf-8").strip()
+                content = candidate.read_text(encoding="utf-8-sig").strip()
                 parsed = try_parse_semver(content)
                 if parsed is not None:
-                    return parsed.normalized
+                    if not is_frozen():
+                        return parsed.normalized
+                    if best_ver is None or parsed > best_ver:
+                        best_ver = parsed
         except Exception:
             continue
+
+    if is_frozen() and compiled_ver is not None:
+        if best_ver is None or compiled_ver > best_ver:
+            return compiled_ver.normalized
+        return best_ver.normalized
+
+    if best_ver is not None:
+        return best_ver.normalized
     return DEFAULT_APP_VERSION
 
 

@@ -12,8 +12,10 @@ import logging
 from typing import Optional, List, Dict, Any, Tuple
 import ollama
 
+from backend.agent.intent import extract_open_command_target
 from backend.agent.tool_registry import ToolRegistry, get_shared_tool_registry
 from backend.automation.application_discovery import get_shared_discovery_service
+from backend.automation.application_launcher import PROHIBITED_QUERY_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -579,13 +581,11 @@ class AgentPlanner:
             }
 
         # 10. Universal Application, Windows Settings, System Utility, or Special Folder launching
-        # ("Open WhatsApp", "Open Spotify", "Start Discord", "Open Android Studio", "Launch Docker Desktop",
-        #  "Open MongoDB Compass", "Open Windows Settings", "Open Bluetooth Settings", "Open Control Panel",
-        #  "Open Device Manager", "Open Task Manager", "Open File Explorer", "Open Downloads", "Open Recycle Bin")
+        # Resolves fuzzy/phonetic/alias queries (e.g. "Open, watch up." -> "WhatsApp") against the
+        # discovered application index and asks for clarification when ambiguous or low-confidence.
         if intent == "open_application" and not ("and type" in lower or "and write" in lower):
-            universal_open = re.search(r"^(?:open|launch|start|run)\s+(.+?)\.?$", clean, re.IGNORECASE)
-            if universal_open:
-                raw_target = universal_open.group(1).strip().strip("'\"")
+            raw_target = extract_open_command_target(clean)
+            if raw_target:
                 lower_target = raw_target.lower()
                 is_url = bool(re.search(r"^(?:https?://|www\.)|\.(?:com|org|net|io|gov|edu)\b", lower_target))
                 is_doc_file = bool(
@@ -600,8 +600,65 @@ class AgentPlanner:
                         lower_target,
                     )
                 )
-                if raw_target and not is_url and not is_doc_file and not is_my_folder and "/" not in raw_target and "\\" not in raw_target:
+                if not is_url and not is_doc_file and not is_my_folder and "/" not in raw_target and "\\" not in raw_target:
                     registry = get_shared_tool_registry()
+                    if lower_target in PROHIBITED_QUERY_NAMES:
+                        return {
+                            "steps": [
+                                {
+                                    "action": "launch_application",
+                                    "description": f"Attempt to launch restricted destination: {raw_target}",
+                                    "parameters": {"application_name": raw_target},
+                                    "requires_confirmation": True,
+                                }
+                            ],
+                            "response": f"Checking security policy for {raw_target}.",
+                        }
+
+                    discovery = get_shared_discovery_service()
+                    resolution = discovery.resolve_query(raw_target)
+                    status = resolution.get("status")
+                    matched = resolution.get("match")
+                    confidence = float(resolution.get("confidence", 0.0) or 0.0)
+
+                    if status == "resolved" and matched is not None and confidence >= 0.72:
+                        # Use canonical display_name unless it contains characters restricted by LaunchApplicationInput
+                        # (e.g. '&' in "Bluetooth & Devices Settings"); in that case keep raw_target or app_id.
+                        candidate_name = matched.display_name
+                        if re.search(r"[/\\;&|><`$\r\n]", candidate_name):
+                            candidate_name = raw_target
+                        needs_conf = (
+                            registry._is_sensitive_application_target(candidate_name)
+                            or registry._is_sensitive_application_target(raw_target)
+                        )
+                        return {
+                            "steps": [
+                                {
+                                    "action": "launch_application",
+                                    "description": f"Launch application or destination: {candidate_name}",
+                                    "parameters": {"application_name": candidate_name},
+                                    "requires_confirmation": needs_conf,
+                                }
+                            ],
+                            "response": f"Opening {candidate_name}.",
+                        }
+
+                    if status == "ambiguous":
+                        clarification_msg = resolution.get("message") or (
+                            f"Multiple installed applications match '{raw_target}'. Which one would you like to open?"
+                        )
+                        return {
+                            "steps": [
+                                {
+                                    "action": "ask_clarification",
+                                    "description": f"Clarify ambiguous application query: {raw_target}",
+                                    "parameters": {"question": clarification_msg},
+                                    "requires_confirmation": False,
+                                }
+                            ],
+                            "response": clarification_msg,
+                        }
+
                     needs_conf = registry._is_sensitive_application_target(raw_target)
                     return {
                         "steps": [

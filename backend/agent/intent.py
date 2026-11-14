@@ -21,6 +21,44 @@ class IntentRecognitionError(Exception):
     pass
 
 
+def extract_open_command_target(text: str) -> Optional[str]:
+    """Extract the target application/destination from a natural-language open/launch command.
+
+    Handles imperfect STT punctuation (e.g. 'Open, watch up.'), polite prefixes
+    ('Please open WhatsApp', 'Can you launch Chrome?'), and avoids misclassifying
+    ordinary conversation ('What is WhatsApp?') or in-app actions.
+    """
+    if not text or not isinstance(text, str):
+        return None
+    cleaned = text.strip()
+    # Strip optional wake-word or polite conversational prefixes
+    cleaned = re.sub(
+        r"^(?:(?:hey|hi|ok|okay)\s+)?voxpilot[,:\s]+",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+    cleaned = re.sub(
+        r"^(?:please|kindly|(?:can|could|would|will)\s+you(?:\s+please)?)\s+",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    match = re.match(
+        r"^(?:open(?:\s+up)?|launch|start|run)\s*[,:\-;]?\s+(.+?)\s*[.?!]*$",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    target = match.group(1).strip().strip("'\"")
+    if not target:
+        return None
+    return target
+
+
 class IntentRecognizer:
 
     def __init__(self, model: str = "qwen3:4b"):
@@ -139,13 +177,12 @@ class IntentRecognizer:
             }
 
         # 4b. Universal Application, Windows Settings, System Utility, and Special Folder Launching
-        # "Open Notepad", "Launch WhatsApp", "Open Spotify", "Start Discord", "Open Visual Studio Code",
-        # "Open Bluetooth Settings", "Open Control Panel", "Open Device Manager", "Open File Explorer", "Open Downloads"
-        open_match = re.search(r"^(?:open|launch|start|run)\s+(.+?)\.?$", lower)
-        if open_match:
-            target = open_match.group(1).strip()
-            is_url = bool(re.search(r"^(?:https?://|www\.)|\.(?:com|org|net|io|gov|edu)\b", target))
-            is_doc_file = bool(re.search(r"\.(?:txt|md|pdf|docx?|xlsx?|pptx?|csv|json|xml|yaml|yml|py|js|ts|html|css|log)$", target))
+        # Handles STT punctuation and polite prefixes (e.g. "Open, watch up.", "Please launch WhatsApp")
+        target = extract_open_command_target(clean)
+        if target:
+            lower_target = target.lower()
+            is_url = bool(re.search(r"^(?:https?://|www\.)|\.(?:com|org|net|io|gov|edu)\b", lower_target))
+            is_doc_file = bool(re.search(r"\.(?:txt|md|pdf|docx?|xlsx?|pptx?|csv|json|xml|yaml|yml|py|js|ts|html|css|log)$", lower_target))
             if not is_url and not is_doc_file:
                 if "and type" in lower or "and write" in lower:
                     return {
@@ -176,9 +213,9 @@ class IntentRecognizer:
                 "reason": "User requested screenshot capture.",
             }
 
-        # 6. General conversation
+        # 6. General conversation (greetings & informational questions mentioning apps)
         if re.search(
-            r"^(?:hello|hi|hey|good\s+morning|good\s+afternoon|good\s+evening|howdy|what\s+can\s+you\s+do|who\s+are\s+you)\b",
+            r"^(?:hello|hi|hey|good\s+morning|good\s+afternoon|good\s+evening|howdy|what\s+can\s+you\s+do|who\s+are\s+you|what\s+is\b|tell\s+me\s+about\b|do\s+you\s+know\b|how\s+do\s+i\s+use\b)",
             lower,
         ):
             return {

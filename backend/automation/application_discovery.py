@@ -548,14 +548,99 @@ def normalize_app_name(raw_name: str) -> str:
     if not isinstance(raw_name, str):
         return ""
     cleaned = raw_name.strip().lower()
-    cleaned = cleaned.strip("'\"")
+    cleaned = cleaned.strip("'\".,!?;:")
     if cleaned.endswith(".exe") or cleaned.endswith(".lnk"):
         cleaned = cleaned[:-4].strip()
+    # Strip apostrophes inside contractions/possessives (e.g. "what's app" -> "whats app")
+    cleaned = cleaned.replace("'", "").replace("\u2019", "")
+    # Normalize connectors and separators
+    cleaned = cleaned.replace("&", " and ")
+    cleaned = re.sub(r"[-_]+", " ", cleaned)
     # Strip trailing version numbers like " (64-bit)", " x64", " v1.2.3"
     cleaned = re.sub(r"\s*\((?:64-bit|32-bit|x64|x86)\)\s*$", "", cleaned)
     cleaned = re.sub(r"\s+v?\d+(?:\.\d+){1,3}\s*$", "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
+
+
+def compact_app_token(norm_name: str) -> str:
+    """Return an alphanumeric-only collapsed form (e.g. 'whats app' -> 'whatsapp')."""
+    return re.sub(r"[^a-z0-9]+", "", norm_name.lower())
+
+
+def compute_soundex(token: str) -> str:
+    """Compute a 4-character American Soundex code for phonetic matching."""
+    letters = re.sub(r"[^a-z]", "", token.lower())
+    if not letters:
+        return ""
+    mapping = {
+        "b": "1", "f": "1", "p": "1", "v": "1",
+        "c": "2", "g": "2", "j": "2", "k": "2", "q": "2", "s": "2", "x": "2", "z": "2",
+        "d": "3", "t": "3",
+        "l": "4",
+        "m": "5", "n": "5",
+        "r": "6",
+    }
+    first = letters[0].upper()
+    encoded: List[str] = []
+    prev_code = mapping.get(letters[0], "")
+    for ch in letters[1:]:
+        if ch in ("h", "w"):
+            continue
+        code = mapping.get(ch, "")
+        if code:
+            if code != prev_code:
+                encoded.append(code)
+            prev_code = code
+        else:
+            prev_code = ""
+    return (first + "".join(encoded) + "000")[:4]
+
+
+def compute_phonetic_skeleton(text: str) -> str:
+    """Build a normalized consonant skeleton for general English phonetic comparison."""
+    s = re.sub(r"[^a-z]", "", text.lower())
+    if not s:
+        return ""
+    s = s.replace("ph", "f").replace("wh", "w").replace("kn", "n").replace("wr", "r")
+    s = s.replace("tch", "t").replace("ck", "k").replace("qu", "kw").replace("x", "ks")
+    s = re.sub(r"c([eiy])", r"s\1", s)
+    s = s.replace("c", "k").replace("z", "s")
+    s = re.sub(r"(.)\1+", r"\1", s)
+    if len(s) <= 2:
+        return s
+    return s[0] + re.sub(r"[aeiouyh]", "", s[1:])
+
+
+def phonetic_similarity(query_norm: str, candidate_norm: str) -> float:
+    """Compute phonetic similarity [0.0, 1.0] between two normalized application names."""
+    q_compact = compact_app_token(query_norm)
+    c_compact = compact_app_token(candidate_norm)
+    if len(q_compact) < 3 or len(c_compact) < 3:
+        return 0.0
+
+    # Guard against wildly different lengths matching on Soundex prefix alone
+    max_len = max(len(q_compact), len(c_compact))
+    min_len = min(len(q_compact), len(c_compact))
+    len_ratio = min_len / max_len
+    if len_ratio < 0.45:
+        return 0.0
+
+    best = 0.0
+    q_soundex = compute_soundex(q_compact)
+    c_soundex = compute_soundex(c_compact)
+    if q_soundex and q_soundex == c_soundex:
+        # Exact Soundex match scaled by length similarity
+        best = max(best, 0.78 + 0.14 * len_ratio)
+
+    q_skel = compute_phonetic_skeleton(q_compact)
+    c_skel = compute_phonetic_skeleton(c_compact)
+    if q_skel and c_skel:
+        skel_ratio = difflib.SequenceMatcher(None, q_skel, c_skel).ratio()
+        if skel_ratio >= 0.72:
+            best = max(best, skel_ratio * 0.90 * (0.7 + 0.3 * len_ratio))
+
+    return min(best, 0.95)
 
 
 def make_app_slug(raw_name: str) -> str:
@@ -1638,12 +1723,14 @@ class ApplicationDiscoveryService:
         if not query_norm:
             return 0.0
 
-        # 1. Exact match on app_id, name, display_name, or any alias
+        query_compact = compact_app_token(query_norm)
+        candidates = [entry.name, entry.display_name.lower()] + entry.aliases
+
+        # 1. Exact match on app_id, name, display_name, aliases, or compact token
         if (
             query_norm == entry.app_id
-            or query_norm == entry.name
-            or query_norm == entry.display_name.lower()
-            or query_norm in entry.aliases
+            or query_norm in candidates
+            or (query_compact and any(query_compact == compact_app_token(c) for c in candidates))
         ):
             return 1.0
 
@@ -1653,17 +1740,25 @@ class ApplicationDiscoveryService:
                 return 0.88
             if query_norm in candidate.split():
                 return 0.85
-            if query_norm in candidate:
-                return 0.75
+            if len(query_norm) >= 4 and query_norm in candidate:
+                return 0.78
 
-        # 3. Fuzzy similarity ratio (handles minor typos like "spotfy" -> "spotify")
-        best_ratio = 0.0
+        # 3. Combined fuzzy + phonetic similarity
+        best_score = 0.0
         for candidate in [entry.name] + entry.aliases:
-            ratio = difflib.SequenceMatcher(None, query_norm, candidate).ratio()
-            if ratio > best_ratio:
-                best_ratio = ratio
+            char_ratio = difflib.SequenceMatcher(None, query_norm, candidate).ratio()
+            cand_compact = compact_app_token(candidate)
+            compact_ratio = (
+                difflib.SequenceMatcher(None, query_compact, cand_compact).ratio()
+                if query_compact and cand_compact
+                else 0.0
+            )
+            phon_score = phonetic_similarity(query_norm, candidate)
+            combined = max(char_ratio, compact_ratio, phon_score)
+            if combined > best_score:
+                best_score = combined
 
-        return best_ratio if best_ratio >= 0.72 else 0.0
+        return best_score if best_score >= 0.72 else 0.0
 
     def resolve_query(self, query: str) -> Dict[str, Any]:
         """Resolve a natural-language application, Settings, utility, or folder query.
@@ -1701,6 +1796,7 @@ class ApplicationDiscoveryService:
                             "status": "resolved",
                             "match": matched_entries[0],
                             "candidates": matched_entries,
+                            "confidence": 1.0,
                             "message": f"Resolved '{query}' to {matched_entries[0].display_name}.",
                         }
                     elif len(matched_entries) > 1:
@@ -1709,6 +1805,7 @@ class ApplicationDiscoveryService:
                             "status": "ambiguous",
                             "match": None,
                             "candidates": matched_entries,
+                            "confidence": 1.0,
                             "message": (
                                 f"Multiple installed applications match '{query}': {cand_names}. "
                                 "Please specify which application you want to open."
@@ -1729,6 +1826,7 @@ class ApplicationDiscoveryService:
                 "status": "not_found",
                 "match": None,
                 "candidates": [],
+                "confidence": 0.0,
                 "message": (
                     f"Application '{query}' is not installed or could not be found on this system. "
                     "Verify that the application is installed or refresh the application index."
@@ -1743,6 +1841,7 @@ class ApplicationDiscoveryService:
                 "status": "resolved",
                 "match": top_entry,
                 "candidates": [top_entry],
+                "confidence": round(top_score, 4),
                 "message": f"Resolved '{query}' to {top_entry.display_name}.",
             }
 
@@ -1756,6 +1855,7 @@ class ApplicationDiscoveryService:
                 "status": "ambiguous",
                 "match": None,
                 "candidates": close_matches[:6],
+                "confidence": round(top_score, 4),
                 "message": (
                     f"Multiple installed applications match '{query}': {cand_names}. "
                     "Please specify which application you want to open."
@@ -1766,6 +1866,7 @@ class ApplicationDiscoveryService:
             "status": "resolved",
             "match": top_entry,
             "candidates": [top_entry],
+            "confidence": round(top_score, 4),
             "message": f"Resolved '{query}' to {top_entry.display_name}.",
         }
 

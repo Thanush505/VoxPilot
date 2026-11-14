@@ -40,8 +40,16 @@ if readme_dist.exists():
     datas.append((str(readme_dist), '.'))
 
 version_file = spec_dir / 'VERSION'
-if version_file.exists():
-    datas.append((str(version_file), '.'))
+if not version_file.exists():
+    raise FileNotFoundError(f"Canonical VERSION file missing at {version_file}")
+_canonical_ver = version_file.read_text(encoding='utf-8-sig').strip()
+sys.path.insert(0, str(spec_dir))
+from backend.version import DEFAULT_APP_VERSION as _DEFAULT_VER
+if _canonical_ver != _DEFAULT_VER:
+    raise ValueError(
+        f"Version mismatch before packaging: VERSION='{_canonical_ver}' != backend.version.DEFAULT_APP_VERSION='{_DEFAULT_VER}'"
+    )
+datas.append((str(version_file), '.'))
 
 # Official VoxPilot application icon assets
 assets_icons_dir = spec_dir / 'assets' / 'icons'

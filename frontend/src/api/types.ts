@@ -372,15 +372,33 @@ export interface UpdateDownloadInfo {
   signature: UpdateSignatureInfo | null;
 }
 
+export interface UpdateBackendHealth {
+  ok: boolean;
+  url?: string | null;
+  status?: string | null;
+  version?: string | null;
+  error?: string | null;
+}
+
 export interface UpdateInstallResult {
   status: string;
+  session_id?: string | null;
+  previous_version?: string | null;
   target_version: string;
+  installed_version?: string | null;
+  installer_filename?: string | null;
   installer_path: string;
+  installer_log?: string | null;
+  runner_log?: string | null;
+  session_log?: string | null;
   started_at: string;
   completed_at: string | null;
   exit_code: number | null;
   relaunch_requested: boolean;
   relaunched: boolean;
+  restart_result?: string | null;
+  backend_health?: UpdateBackendHealth | null;
+  recovery_hint?: string | null;
   error: string | null;
 }
 

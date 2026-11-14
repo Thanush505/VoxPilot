@@ -1,10 +1,19 @@
-﻿; ==============================================================================
+; ==============================================================================
 ; VoxPilot - Inno Setup Installer Script
 ; Packages the PyInstaller standalone one-folder distribution into VoxPilot-Setup.exe
 ; ==============================================================================
 
 #define MyAppName "VoxPilot"
-#define MyAppVersion "0.5.1"
+; Read canonical version from repository root VERSION file
+#define VersionFileHandle FileOpen("..\VERSION")
+#if !VersionFileHandle
+  #error "Cannot open ..\VERSION file to determine MyAppVersion."
+#endif
+#define MyAppVersion Trim(FileRead(VersionFileHandle))
+#expr FileClose(VersionFileHandle)
+#if MyAppVersion == ""
+  #error "..\VERSION file is empty."
+#endif
 #define MyAppPublisher "VoxPilot Team"
 #define MyAppURL "https://github.com/VoxPilot"
 #define MyAppExeName "VoxPilot.exe"
@@ -36,6 +45,9 @@ PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 DisableProgramGroupPage=yes
 UsedUserAreasWarning=no
+CloseApplications=yes
+CloseApplicationsFilter=*.exe
+RestartApplications=no
 
 ; Pre-installation informational notice
 InfoBeforeFile=INSTALL_NOTICE.txt
@@ -45,7 +57,7 @@ SetupIconFile={#MyAppIcon}
 WizardSmallImageFile={#MyAppWizardSmallImage}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
-VersionInfoVersion=0.5.1.0
+VersionInfoVersion={#MyAppVersion}.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName} â€” Personal AI Desktop Control Agent Setup
 VersionInfoProductName={#MyAppName}
@@ -61,18 +73,20 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 ; Install the full PyInstaller standalone one-folder distribution
 Source: "..\dist\VoxPilot\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Install canonical VERSION file at installation root for post-install verification
+Source: "..\VERSION"; DestDir: "{app}"; Flags: ignoreversion
 ; Install official application icon into installation root for explicit shortcut & shell branding
 Source: "{#MyAppIcon}"; DestDir: "{app}"; DestName: "voxpilot.ico"; Flags: ignoreversion
 
 [Icons]
 ; Start Menu shortcuts (all branded with the official VoxPilot icon)
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"; AppUserModelID: "VoxPilotTeam.VoxPilot.DesktopAgent.0.5.0"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"; AppUserModelID: "VoxPilotTeam.VoxPilot.DesktopAgent.{#MyAppVersion}"
 Name: "{group}\Install Playwright Browser"; Filename: "{app}\install_browser.bat"; IconFilename: "{app}\voxpilot.ico"
 Name: "{group}\VoxPilot Readme"; Filename: "{app}\README.txt"; IconFilename: "{app}\voxpilot.ico"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"; IconFilename: "{app}\voxpilot.ico"
 
 ; Optional Desktop shortcut
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"; AppUserModelID: "VoxPilotTeam.VoxPilot.DesktopAgent.0.5.0"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"; AppUserModelID: "VoxPilotTeam.VoxPilot.DesktopAgent.{#MyAppVersion}"; Tasks: desktopicon
 
 [Run]
 ; Option to launch VoxPilot immediately after setup completes

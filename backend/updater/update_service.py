@@ -30,6 +30,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from backend.paths import (
     get_config_dir,
     get_executable_dir,
+    get_log_dir,
     get_project_root,
     get_updates_dir,
     is_frozen,
@@ -440,7 +441,7 @@ class UpdateService:
         if not path.is_file():
             return None
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
             return data if isinstance(data, dict) else None
         except Exception:
             return None
@@ -490,6 +491,23 @@ class UpdateService:
         notification_dismissed = bool(
             self._update_available and self._latest_version and dismissed == self._latest_version
         )
+        last_install = self.get_last_install_result()
+        status_message = self._status_message
+        error_code = self._error_code
+        error_message = self._error_message
+        if (
+            self._state == "idle"
+            and error_code is None
+            and last_install
+            and last_install.get("status") == "failed"
+            and last_install.get("target_version") != self.installed_version
+        ):
+            error_code = "install_failed"
+            error_message = last_install.get("error") or "Previous update installation failed."
+            status_message = (
+                f"Previous update to v{last_install.get('target_version', 'unknown')} failed: "
+                f"{error_message}"
+            )
         return {
             "state": self._state,
             "installed_version": self.installed_version,
@@ -526,10 +544,10 @@ class UpdateService:
                 "sha256_verified": self._sha256_verified,
                 "signature": self._signature_info,
             },
-            "last_install_result": self.get_last_install_result(),
-            "status_message": self._status_message,
-            "error_code": self._error_code,
-            "error_message": self._error_message,
+            "last_install_result": last_install,
+            "status_message": status_message,
+            "error_code": error_code,
+            "error_message": error_message,
         }
 
     def _build_github_headers(self) -> Dict[str, str]:
@@ -1224,6 +1242,10 @@ class UpdateService:
             install_dir = get_executable_dir()
             relaunch_exe = install_dir / "VoxPilot.exe"
             current_pid = os.getpid() if shutdown_app else 0
+            host = os.environ.get("VOXPILOT_HOST", "127.0.0.1")
+            port = os.environ.get("VOXPILOT_PORT", "8000")
+            health_url = f"http://{host}:{port}/health" if relaunch else ""
+            session_id = f"upd_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{os.getpid()}"
 
             # Generate the external PowerShell updater helper inside %LOCALAPPDATA%\VoxPilot\updates
             ps_script = generate_powershell_updater_script(
@@ -1236,28 +1258,58 @@ class UpdateService:
                 install_dir=install_dir,
                 relaunch_exe=relaunch_exe,
                 relaunch=relaunch,
+                session_id=session_id,
+                previous_version=self.installed_version,
+                logs_dir=get_log_dir(),
+                health_url=health_url,
             )
 
             creationflags = 0
             if sys.platform == "win32":
                 creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
 
-            subprocess.Popen(
-                [
-                    "powershell",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-WindowStyle",
-                    "Hidden",
-                    "-File",
-                    str(ps_script),
-                ],
-                cwd=str(self.updates_dir),
-                creationflags=creationflags,
-                close_fds=True,
-            )
+            bootstrap_log = self.updates_dir / "updater_bootstrap.log"
+            log_fh = open(bootstrap_log, "w", encoding="utf-8")
+            try:
+                proc = subprocess.Popen(
+                    [
+                        "powershell",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-WindowStyle",
+                        "Hidden",
+                        "-File",
+                        str(ps_script),
+                    ],
+                    cwd=str(self.updates_dir),
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_fh,
+                    stderr=subprocess.STDOUT,
+                    creationflags=creationflags,
+                    close_fds=False,
+                )
+            finally:
+                log_fh.close()
+
+            # Verify the detached PowerShell updater did not crash immediately on startup
+            time.sleep(0.25)
+            early_rc = proc.poll()
+            if early_rc is not None and early_rc != 0:
+                tail = ""
+                try:
+                    tail = bootstrap_log.read_text(encoding="utf-8", errors="replace").strip()[-500:]
+                except Exception:
+                    pass
+                self._state = "failed"
+                self._error_code = "updater_launch_failed"
+                self._error_message = (
+                    f"External updater exited immediately with code {early_rc}."
+                    + (f" Details: {tail}" if tail else "")
+                )
+                self._status_message = self._error_message
+                raise UpdateError(self._error_message)
 
             self._state = "installing"
             self._status_message = (
@@ -1271,7 +1323,13 @@ class UpdateService:
                 shutdown_callback()
             else:
                 def _delayed_shutdown() -> None:
+                    import signal
                     time.sleep(0.8)
+                    try:
+                        os.kill(os.getpid(), signal.SIGTERM)
+                    except Exception:
+                        pass
+                    time.sleep(2.5)
                     os._exit(0)
 
                 threading.Thread(target=_delayed_shutdown, daemon=True).start()
