@@ -1,6 +1,8 @@
 import React from 'react';
 import { RefreshCw, Menu, Settings } from 'lucide-react';
 import { BackendConnectionState } from '../../hooks/useBackendHealth';
+import { ProfileItem } from '../../api/types';
+import { renderProfileAvatarIcon } from '../settings/ProfileManagementCard';
 
 interface HeaderProps {
   pageTitle: string;
@@ -10,6 +12,10 @@ interface HeaderProps {
   onRefresh: () => void;
   onToggleSidebar: () => void;
   onSelectNav: (item: string) => void;
+  profiles?: ProfileItem[];
+  activeProfile?: ProfileItem | null;
+  isProfileSwitching?: boolean;
+  onSwitchProfile?: (profileId: string) => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -20,6 +26,10 @@ export const Header: React.FC<HeaderProps> = ({
   onRefresh,
   onToggleSidebar,
   onSelectNav,
+  profiles = [],
+  activeProfile = null,
+  isProfileSwitching = false,
+  onSwitchProfile,
 }) => {
   const formatTime = (date: Date | null): string => {
     if (!date) return 'Never';
@@ -48,6 +58,34 @@ export const Header: React.FC<HeaderProps> = ({
       </div>
 
       <div className="header-right">
+        {/* Local Profile Switcher */}
+        {connectionState === 'connected' && profiles.length > 0 && onSwitchProfile && (
+          <div
+            className="header-profile-switcher"
+            data-testid="profile-switcher"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+          >
+            <span title={activeProfile?.description || activeProfile?.name || 'Active Profile'}>
+              {renderProfileAvatarIcon(activeProfile?.avatar, 14)}
+            </span>
+            <select
+              className="status-filter-select"
+              value={activeProfile?.id || 'default'}
+              onChange={(e) => onSwitchProfile(e.target.value)}
+              disabled={isProfileSwitching}
+              aria-label="Switch Active Profile"
+              title="Switch active local profile"
+              style={{ minWidth: 120, padding: '4px 8px', fontSize: 12 }}
+            >
+              {profiles.map((prof) => (
+                <option key={prof.id} value={prof.id}>
+                  {prof.name}{prof.is_default ? ' (Default)' : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
         {/* Backend Connectivity Status Pill */}
         <div className={`health-pill ${connectionState}`}>
           <span className={`status-dot ${connectionState === 'connected' ? 'pulse' : ''}`} />

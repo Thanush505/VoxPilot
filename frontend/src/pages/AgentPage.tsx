@@ -12,13 +12,17 @@ import {
   ChatMessage as ChatMessageType,
   ConversationInfo,
   ExecutionStatusResponse,
+  ScreenCaptureResponse,
   VoiceStatusResponse,
   VoicePhase,
+  EmailDraftItem,
+  ActiveProviderResponse,
 } from '../api/types';
 import ChatMessage from '../components/agent/ChatMessage';
 import ChatInput from '../components/agent/ChatInput';
 import ConversationList from '../components/agent/ConversationList';
 import ExecutionProgress from '../components/agent/ExecutionProgress';
+import EmailDraftPanel from '../components/agent/EmailDraftPanel';
 import EmptyState from '../components/common/EmptyState';
 
 interface AgentPageProps {
@@ -32,14 +36,23 @@ export const AgentPage: React.FC<AgentPageProps> = ({
 }) => {
   const [conversations, setConversations] = useState<ConversationInfo[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
+  const [activeEmailDraft, setActiveEmailDraft] = useState<EmailDraftItem | null>(null);
   const [conversationMessages, setConversationMessages] = useState<Record<string, ChatMessageType[]>>({});
   const [activeExecution, setActiveExecution] = useState<ExecutionStatusResponse | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isSessionsLoading, setIsSessionsLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  // Ephemeral On-Demand Screen Awareness State
+  const [capturedScreen, setCapturedScreen] = useState<ScreenCaptureResponse | null>(null);
+  const [isCapturingScreen, setIsCapturingScreen] = useState<boolean>(false);
+  const [showCaptureConfirm, setShowCaptureConfirm] = useState<boolean>(false);
+  const [captureError, setCaptureError] = useState<string | null>(null);
+  const [isAnalyzingScreen, setIsAnalyzingScreen] = useState<boolean>(false);
+
   // Voice Mode State
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatusResponse | null>(null);
+  const [activeProvider, setActiveProvider] = useState<ActiveProviderResponse | null>(null);
   const lastEventIdRef = useRef<number>(0);
   const currentConvRef = useRef<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -47,6 +60,19 @@ export const AgentPage: React.FC<AgentPageProps> = ({
   useEffect(() => {
     currentConvRef.current = currentConversationId;
   }, [currentConversationId]);
+
+  useEffect(() => {
+    if (!isBackendConnected) return;
+    let cancelled = false;
+    apiClient.getActiveProvider().then((res) => {
+      if (!cancelled && res.ok && res.data) {
+        setActiveProvider(res.data);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isBackendConnected]);
 
   const activeMessages = useMemo(() => {
     return currentConversationId
@@ -205,6 +231,48 @@ export const AgentPage: React.FC<AgentPageProps> = ({
     }
   };
 
+  const handleStartPtt = async () => {
+    setErrorMsg(null);
+    const res = await apiClient.startPushToTalk(currentConversationId || undefined);
+    if (res.ok && res.data) {
+      setVoiceStatus(res.data);
+    } else if (res.error) {
+      setErrorMsg(res.error);
+    }
+  };
+
+  const handleStopPtt = async () => {
+    const res = await apiClient.stopPushToTalk();
+    if (res.ok && res.data) {
+      setVoiceStatus(res.data);
+      if (res.data.latest_event_id > lastEventIdRef.current) {
+        await pollVoiceStatus();
+      }
+    } else if (res.error) {
+      setErrorMsg(res.error);
+    }
+  };
+
+  const handleInterruptVoice = async () => {
+    const res = await apiClient.interruptVoice('Interrupted by user from Agent chat');
+    if (res.ok && res.data) {
+      setVoiceStatus(res.data);
+    }
+  };
+
+  const handleToggleWakeWord = async () => {
+    setErrorMsg(null);
+    const currentEnabled = Boolean(
+      voiceStatus?.wake_word_enabled ?? voiceStatus?.settings?.wake_word_enabled
+    );
+    const res = await apiClient.updateVoiceConfig({ wake_word_enabled: !currentEnabled });
+    if (res.ok && res.data) {
+      setVoiceStatus(res.data);
+    } else if (res.error) {
+      setErrorMsg(res.error);
+    }
+  };
+
   // When switching conversations, load previous executions for that session if not already in memory
   const handleSelectConversation = async (conversationId: string) => {
     setCurrentConversationId(conversationId);
@@ -251,10 +319,50 @@ export const AgentPage: React.FC<AgentPageProps> = ({
     }
   };
 
+  const handleRequestScreenCapture = () => {
+    setCaptureError(null);
+    setShowCaptureConfirm((prev) => !prev);
+  };
+
+  const handleCancelScreenCapture = () => {
+    setShowCaptureConfirm(false);
+    setCaptureError(null);
+  };
+
+  const handleConfirmScreenCapture = async () => {
+    if (isCapturingScreen) return;
+    setIsCapturingScreen(true);
+    setCaptureError(null);
+
+    try {
+      const res = await apiClient.captureScreen(true);
+      if (res.ok && res.data) {
+        setCapturedScreen(res.data);
+        setShowCaptureConfirm(false);
+      } else {
+        setCaptureError(res.error || 'Failed to capture primary display.');
+      }
+    } catch (err: unknown) {
+      setCaptureError(err instanceof Error ? err.message : 'Screen capture failed.');
+    } finally {
+      setIsCapturingScreen(false);
+    }
+  };
+
+  const handleRemoveScreenCapture = async () => {
+    const existing = capturedScreen;
+    setCapturedScreen(null);
+    setCaptureError(null);
+    if (existing?.capture_id) {
+      await apiClient.deleteScreenCapture(existing.capture_id, existing.profile_id).catch(() => { });
+    }
+  };
+
   const handleNewConversation = () => {
     setCurrentConversationId(null);
     setActiveExecution(null);
     setErrorMsg(null);
+    setShowCaptureConfirm(false);
   };
 
   // Handle sending a new text message
@@ -262,12 +370,15 @@ export const AgentPage: React.FC<AgentPageProps> = ({
     if (!userInput.trim() || isLoading) return;
 
     setErrorMsg(null);
+    setCaptureError(null);
+    setShowCaptureConfirm(false);
     const sessionKey = currentConversationId || '__new__';
+    const attachedCapture = capturedScreen;
 
     const userMsg: ChatMessageType = {
       id: `user-${Date.now()}`,
       sender: 'user',
-      text: userInput,
+      text: attachedCapture ? `[Screen Attached] ${userInput}` : userInput,
       timestamp: new Date(),
     };
 
@@ -277,16 +388,26 @@ export const AgentPage: React.FC<AgentPageProps> = ({
     }));
 
     setIsLoading(true);
+    setIsAnalyzingScreen(Boolean(attachedCapture));
+    if (attachedCapture) {
+      setCapturedScreen(null);
+    }
 
     try {
       const res = await apiClient.execute(
         userInput,
-        currentConversationId || undefined
+        currentConversationId || undefined,
+        undefined,
+        attachedCapture?.capture_id
       );
 
       if (res.ok && res.data) {
         const exec = res.data;
         setActiveExecution(exec);
+        const maybeDraft = (exec.execution_results?.[0] as { draft?: EmailDraftItem } | undefined)?.draft;
+        if (maybeDraft) {
+          setActiveEmailDraft(maybeDraft);
+        }
 
         const newConvId = exec.conversation_id || currentConversationId;
         if (newConvId && newConvId !== currentConversationId) {
@@ -370,6 +491,7 @@ export const AgentPage: React.FC<AgentPageProps> = ({
       }));
     } finally {
       setIsLoading(false);
+      setIsAnalyzingScreen(false);
     }
   };
 
@@ -403,7 +525,25 @@ export const AgentPage: React.FC<AgentPageProps> = ({
                   : 'New Conversation Session'}
               </h2>
               <span className="chat-session-subtitle">
-                LangGraph Agent (Qwen 3B/4B) • Voice Shortcut: {voiceShortcut}
+                {activeProvider?.profile_config?.active_provider_id === 'byok' ? (
+                  <>
+                    BYOK (OpenAI • {activeProvider.profile_config.byok_model || 'gpt-4o-mini'}) •{' '}
+                    <span className="text-amber-600 dark:text-amber-400 font-medium">
+                      External AI
+                    </span>
+                    {!activeProvider.health?.available && (
+                      <span className="text-rose-600 dark:text-rose-400">
+                        {' '}• {activeProvider.health?.reason || 'Unavailable'}
+                      </span>
+                    )}
+                    {!activeProvider.capabilities?.vision && ' • Vision unsupported'}
+                  </>
+                ) : (
+                  <>
+                    Local AI ({activeProvider?.profile_config?.local_model || 'qwen3:4b'}) • Voice Shortcut:{' '}
+                    {voiceShortcut}
+                  </>
+                )}
               </span>
             </div>
           </div>
@@ -447,7 +587,7 @@ export const AgentPage: React.FC<AgentPageProps> = ({
         {/* In-Flight Execution Progress Tracker */}
         {activeExecution && (
           <div className="chat-progress-banner">
-            <ExecutionProgress execution={activeExecution} showDetails={false} />
+            <ExecutionProgress execution={activeExecution} showDetails={true} />
           </div>
         )}
 
@@ -461,11 +601,30 @@ export const AgentPage: React.FC<AgentPageProps> = ({
           )}
 
           {activeMessages.length === 0 ? (
-            <EmptyState
-              icon={<Bot size={32} />}
-              title="VoxPilot Desktop Agent Ready"
-              description={`Type a command, click the microphone button, or press ${voiceShortcut} anywhere in Windows to speak to VoxPilot.`}
-            />
+            <div className="agent-empty-workspace">
+              <EmptyState
+                icon={<Bot size={32} />}
+                title="VoxPilot Desktop Agent Ready"
+                description={`Type a command, click the microphone button, or press ${voiceShortcut} anywhere in Windows to speak to VoxPilot.`}
+              />
+              <div className="agent-quick-prompts" aria-label="Suggested commands">
+                {[
+                  'Check system hardware status',
+                  'List running applications',
+                  'Open Notepad and type a summary',
+                ].map((prompt) => (
+                  <button
+                    key={prompt}
+                    type="button"
+                    className="agent-quick-prompt-chip"
+                    disabled={!isBackendConnected || isLoading}
+                    onClick={() => handleSendMessage(prompt)}
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+            </div>
           ) : (
             activeMessages.map((msg) => (
               <ChatMessage
@@ -484,7 +643,9 @@ export const AgentPage: React.FC<AgentPageProps> = ({
                 <span />
               </div>
               <span className="thinking-text">
-                VoxPilot is recognizing intent, planning, and executing tools...
+                {isAnalyzingScreen
+                  ? 'Analyzing captured screen context locally...'
+                  : 'VoxPilot is recognizing intent, planning, and executing tools...'}
               </span>
             </div>
           )}
@@ -494,6 +655,15 @@ export const AgentPage: React.FC<AgentPageProps> = ({
               <AlertTriangle size={15} />
               <span>{errorMsg}</span>
             </div>
+          )}
+
+          {activeEmailDraft && (
+            <EmailDraftPanel
+              draft={activeEmailDraft}
+              profileId={activeEmailDraft.profile_id}
+              onDraftUpdated={(updated) => setActiveEmailDraft(updated)}
+              onSent={() => setActiveEmailDraft(null)}
+            />
           )}
 
           <div ref={messagesEndRef} />
@@ -508,11 +678,27 @@ export const AgentPage: React.FC<AgentPageProps> = ({
             isVoiceActive={isVoiceActive}
             voicePhase={voicePhase}
             isRecording={isRecording}
+            isPttActive={Boolean(voiceStatus?.is_ptt_active)}
+            wakeWordEnabled={Boolean(
+              voiceStatus?.wake_word_enabled ?? voiceStatus?.settings?.wake_word_enabled
+            )}
             voiceShortcut={voiceShortcut}
             voiceError={voiceError}
             lastTranscript={voiceStatus?.last_transcript || null}
             onToggleVoice={handleToggleVoiceMode}
             onCancelVoice={handleCancelVoiceMode}
+            onStartPtt={handleStartPtt}
+            onStopPtt={handleStopPtt}
+            onInterruptVoice={handleInterruptVoice}
+            onToggleWakeWord={handleToggleWakeWord}
+            capturedScreen={capturedScreen}
+            isCapturingScreen={isCapturingScreen}
+            showCaptureConfirm={showCaptureConfirm}
+            captureError={captureError}
+            onRequestScreenCapture={handleRequestScreenCapture}
+            onConfirmScreenCapture={handleConfirmScreenCapture}
+            onCancelScreenCapture={handleCancelScreenCapture}
+            onRemoveScreenCapture={handleRemoveScreenCapture}
           />
         </div>
       </div>

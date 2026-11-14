@@ -8,12 +8,12 @@ from __future__ import annotations
 import os
 import logging
 from pathlib import Path
-from typing import Optional, AsyncGenerator, Generator
+from typing import Optional, AsyncGenerator, Generator, Dict, Any
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine, async_sessionmaker
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import SQLModel, create_engine, Session
-from sqlalchemy.engine import Engine
-from sqlalchemy import event
+from sqlalchemy.engine import Engine, Connection
+from sqlalchemy import event, text
 
 logger = logging.getLogger(__name__)
 
@@ -117,24 +117,271 @@ def get_sessionmaker(engine: Optional[AsyncEngine] = None) -> async_sessionmaker
     return _SESSION_MAKER
 
 
+_FTS5_AVAILABLE: Optional[bool] = None
+
+
+def _get_table_columns(conn: Connection, table_name: str) -> set[str]:
+    """Return existing column names for an SQLite table."""
+    rows = conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
+    return {str(row[1]) for row in rows if len(row) > 1}
+
+
+def _table_exists(conn: Connection, table_name: str) -> bool:
+    row = conn.execute(
+        text("SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name = :name"),
+        {"name": table_name},
+    ).fetchone()
+    return row is not None
+
+
+def run_migrations_with_connection(conn: Connection) -> Dict[str, Any]:
+    """Idempotently create and migrate VoxPilot SQLite tables and FTS5 index.
+
+    Safe to run repeatedly on both fresh databases and existing installations
+    without dropping tables or altering existing user rows.
+    """
+    global _FTS5_AVAILABLE
+    # Ensure all SQLModel models are registered on metadata before create_all
+    import backend.database.models  # noqa: F401
+
+    SQLModel.metadata.create_all(conn)
+
+    applied_steps: list[str] = []
+
+    # 1. Migrate legacy ConversationRecord columns without data loss
+    if _table_exists(conn, "conversationrecord"):
+        conv_cols = _get_table_columns(conn, "conversationrecord")
+        if "profile_id" not in conv_cols:
+            conn.execute(
+                text("ALTER TABLE conversationrecord ADD COLUMN profile_id TEXT DEFAULT 'default'")
+            )
+            conn.execute(
+                text("UPDATE conversationrecord SET profile_id = 'default' WHERE profile_id IS NULL")
+            )
+            applied_steps.append("added_conversationrecord.profile_id")
+        if "active_context_json" not in conv_cols:
+            conn.execute(
+                text("ALTER TABLE conversationrecord ADD COLUMN active_context_json TEXT")
+            )
+            applied_steps.append("added_conversationrecord.active_context_json")
+        conn.execute(
+            text("UPDATE conversationrecord SET profile_id = 'default' WHERE profile_id IS NULL OR TRIM(profile_id) = ''")
+        )
+
+    # 1b. Migrate legacy ExecutionRecord.profile_id from ConversationRecord without data loss
+    if _table_exists(conn, "executionrecord"):
+        exec_cols = _get_table_columns(conn, "executionrecord")
+        if "profile_id" not in exec_cols:
+            conn.execute(
+                text("ALTER TABLE executionrecord ADD COLUMN profile_id TEXT DEFAULT 'default'")
+            )
+            applied_steps.append("added_executionrecord.profile_id")
+        if _table_exists(conn, "conversationrecord"):
+            conn.execute(
+                text(
+                    "UPDATE executionrecord "
+                    "SET profile_id = COALESCE("
+                    "  (SELECT c.profile_id FROM conversationrecord c "
+                    "   WHERE c.conversation_id = executionrecord.conversation_id), "
+                    "  'default'"
+                    ") "
+                    "WHERE profile_id IS NULL OR TRIM(profile_id) = '' OR profile_id = 'default'"
+                )
+            )
+        else:
+            conn.execute(
+                text("UPDATE executionrecord SET profile_id = 'default' WHERE profile_id IS NULL OR TRIM(profile_id) = ''")
+            )
+        conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_executionrecord_profile_id ON executionrecord (profile_id)")
+        )
+
+    # 1c. Ensure ProfileRecord default profile & unique normalized_name index
+    if _table_exists(conn, "profilerecord"):
+        prof_cols = _get_table_columns(conn, "profilerecord")
+        if "theme_mode" not in prof_cols:
+            conn.execute(
+                text("ALTER TABLE profilerecord ADD COLUMN theme_mode TEXT NOT NULL DEFAULT 'dark'")
+            )
+            applied_steps.append("added_profilerecord.theme_mode")
+        if "accent_color" not in prof_cols:
+            conn.execute(
+                text("ALTER TABLE profilerecord ADD COLUMN accent_color TEXT NOT NULL DEFAULT 'blue'")
+            )
+            applied_steps.append("added_profilerecord.accent_color")
+        conn.execute(
+            text("UPDATE profilerecord SET theme_mode = 'dark' WHERE theme_mode IS NULL OR TRIM(theme_mode) = ''")
+        )
+        conn.execute(
+            text("UPDATE profilerecord SET accent_color = 'blue' WHERE accent_color IS NULL OR TRIM(accent_color) = ''")
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_profilerecord_normalized_name "
+                "ON profilerecord (normalized_name)"
+            )
+        )
+        default_exists = conn.execute(
+            text("SELECT 1 FROM profilerecord WHERE id = 'default'")
+        ).first()
+        if not default_exists:
+            conn.execute(
+                text(
+                    "INSERT INTO profilerecord "
+                    "(id, name, normalized_name, description, avatar, theme_mode, accent_color, is_active, is_default, created_at, updated_at) "
+                    "VALUES ('default', 'Default', 'default', 'Default local VoxPilot profile', 'user', 'dark', 'blue', 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                )
+            )
+            applied_steps.append("created_default_profile")
+        else:
+            conn.execute(
+                text("UPDATE profilerecord SET is_default = 1 WHERE id = 'default'")
+            )
+
+        active_row = conn.execute(
+            text("SELECT id FROM profilerecord WHERE is_active = 1 LIMIT 1")
+        ).first()
+        if not active_row:
+            conn.execute(
+                text("UPDATE profilerecord SET is_active = 1 WHERE id = 'default'")
+            )
+            applied_steps.append("activated_default_profile")
+
+        if _table_exists(conn, "profile_provider_configs"):
+            conn.execute(
+                text(
+                    "INSERT OR IGNORE INTO profile_provider_configs "
+                    "(profile_id, active_provider_id, local_model, config_json, updated_at) "
+                    "SELECT id, 'local', 'qwen3:4b', '{}', CURRENT_TIMESTAMP FROM profilerecord"
+                )
+            )
+            applied_steps.append("ensured_profile_provider_configs")
+
+    # 2. Ensure composite index on memoryrecord (profile_id, normalized_content)
+    if _table_exists(conn, "memoryrecord"):
+        conn.execute(
+            text("UPDATE memoryrecord SET profile_id = 'default' WHERE profile_id IS NULL OR TRIM(profile_id) = ''")
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_memoryrecord_profile_norm "
+                "ON memoryrecord (profile_id, normalized_content)"
+            )
+        )
+
+    # 2b. Ensure preferencerecord columns & composite index (profile_id, category, normalized_key)
+    if _table_exists(conn, "preferencerecord"):
+        pref_cols = _get_table_columns(conn, "preferencerecord")
+        if "enabled" not in pref_cols:
+            conn.execute(
+                text("ALTER TABLE preferencerecord ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT 1")
+            )
+            applied_steps.append("added_preferencerecord.enabled")
+        if "priority" not in pref_cols:
+            conn.execute(
+                text("ALTER TABLE preferencerecord ADD COLUMN priority INTEGER NOT NULL DEFAULT 3")
+            )
+            applied_steps.append("added_preferencerecord.priority")
+        if "description" not in pref_cols:
+            conn.execute(
+                text("ALTER TABLE preferencerecord ADD COLUMN description TEXT")
+            )
+            applied_steps.append("added_preferencerecord.description")
+        if "metadata_json" not in pref_cols:
+            conn.execute(
+                text("ALTER TABLE preferencerecord ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
+            )
+            applied_steps.append("added_preferencerecord.metadata_json")
+
+        conn.execute(
+            text("UPDATE preferencerecord SET profile_id = 'default' WHERE profile_id IS NULL OR TRIM(profile_id) = ''")
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_preferencerecord_profile_cat_key "
+                "ON preferencerecord (profile_id, category, normalized_key)"
+            )
+        )
+        applied_steps.append("ensured_preferencerecord_index")
+
+    # 3. Create FTS5 virtual table for local full-text memory search (graceful fallback if unavailable)
+    fts_available = False
+    try:
+        conn.execute(
+            text(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5("
+                "memory_id UNINDEXED, "
+                "content, "
+                "memory_type UNINDEXED, "
+                "profile_id UNINDEXED"
+                ")"
+            )
+        )
+        fts_available = True
+        applied_steps.append("ensured_memories_fts")
+
+        # Idempotent backfill of any MemoryRecord rows missing from memories_fts
+        if _table_exists(conn, "memoryrecord"):
+            conn.execute(
+                text(
+                    "INSERT INTO memories_fts (memory_id, content, memory_type, profile_id) "
+                    "SELECT m.id, m.content, m.memory_type, m.profile_id "
+                    "FROM memoryrecord m "
+                    "WHERE NOT EXISTS ("
+                    "  SELECT 1 FROM memories_fts f WHERE f.memory_id = m.id"
+                    ")"
+                )
+            )
+    except Exception as fts_err:
+        fts_available = False
+        logger.warning(f"SQLite FTS5 unavailable; falling back to LIKE search: {fts_err}")
+
+    _FTS5_AVAILABLE = fts_available
+    return {
+        "fts5_available": fts_available,
+        "applied_steps": applied_steps,
+    }
+
+
+def run_migrations_sync(engine: Optional[Engine] = None) -> Dict[str, Any]:
+    """Run idempotent schema and FTS5 migrations on a synchronous SQLAlchemy engine."""
+    target_engine = engine or get_sync_engine()
+    with target_engine.begin() as conn:
+        return run_migrations_with_connection(conn)
+
+
+def is_fts5_available(engine: Optional[Engine] = None) -> bool:
+    """Return whether SQLite FTS5 virtual table support is available on this database."""
+    global _FTS5_AVAILABLE
+    if _FTS5_AVAILABLE is not None and engine is None:
+        return _FTS5_AVAILABLE
+    target_engine = engine or get_sync_engine()
+    with target_engine.begin() as conn:
+        if _table_exists(conn, "memories_fts"):
+            _FTS5_AVAILABLE = True
+            return True
+        res = run_migrations_with_connection(conn)
+        return bool(res.get("fts5_available", False))
+
+
 async def init_db(db_url: Optional[str] = None) -> None:
-    """Create all SQLModel tables safely if they do not already exist."""
+    """Create and migrate all SQLModel tables and FTS5 index safely."""
     engine = get_async_engine(db_url)
     async with engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.create_all)
-    logger.info("Database schema initialized successfully.")
+        await conn.run_sync(run_migrations_with_connection)
+    logger.info("Database schema and migrations initialized successfully.")
 
 
 def init_db_sync(db_url: Optional[str] = None) -> None:
-    """Synchronous database schema creation."""
+    """Synchronous database schema creation and idempotent migration."""
     engine = get_sync_engine(db_url)
-    SQLModel.metadata.create_all(engine)
-    logger.info("Database schema initialized synchronously.")
+    run_migrations_sync(engine)
+    logger.info("Database schema and migrations initialized synchronously.")
 
 
 async def close_db() -> None:
     """Dispose active engine connection pools gracefully."""
-    global _ASYNC_ENGINE, _SESSION_MAKER, _SYNC_ENGINE
+    global _ASYNC_ENGINE, _SESSION_MAKER, _SYNC_ENGINE, _FTS5_AVAILABLE
     if _ASYNC_ENGINE is not None:
         await _ASYNC_ENGINE.dispose()
         _ASYNC_ENGINE = None
@@ -142,12 +389,13 @@ async def close_db() -> None:
     if _SYNC_ENGINE is not None:
         _SYNC_ENGINE.dispose()
         _SYNC_ENGINE = None
+    _FTS5_AVAILABLE = None
     logger.info("Database engines disposed.")
 
 
 def reset_db_connection() -> None:
     """Synchronous reset helper for test fixtures."""
-    global _ASYNC_ENGINE, _SESSION_MAKER, _SYNC_ENGINE
+    global _ASYNC_ENGINE, _SESSION_MAKER, _SYNC_ENGINE, _FTS5_AVAILABLE
     if _SYNC_ENGINE is not None:
         try:
             _SYNC_ENGINE.dispose()
@@ -156,6 +404,7 @@ def reset_db_connection() -> None:
     _ASYNC_ENGINE = None
     _SESSION_MAKER = None
     _SYNC_ENGINE = None
+    _FTS5_AVAILABLE = None
 
 
 async def get_async_session() -> AsyncGenerator[AsyncSession, None]:

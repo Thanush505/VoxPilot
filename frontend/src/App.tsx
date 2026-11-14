@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import AppLayout from './components/layout/AppLayout';
 import DashboardPage from './pages/DashboardPage';
 import AgentPage from './pages/AgentPage';
@@ -10,6 +10,9 @@ import AuditLogsPage from './pages/AuditLogsPage';
 import SettingsPage from './pages/SettingsPage';
 import UpcomingSection from './components/common/UpcomingSection';
 import useBackendHealth from './hooks/useBackendHealth';
+import apiClient from './api/client';
+import { ProfileItem } from './api/types';
+import { useTheme } from './theme/ThemeProvider';
 import './styles/globals.css';
 import './styles/dashboard.css';
 
@@ -17,6 +20,10 @@ const UPCOMING_DESCRIPTIONS: Record<string, { title: string; description: string
 
 export function App() {
   const [currentNav, setCurrentNav] = useState<string>('dashboard');
+  const [profiles, setProfiles] = useState<ProfileItem[]>([]);
+  const [activeProfile, setActiveProfile] = useState<ProfileItem | null>(null);
+  const [isProfileSwitching, setIsProfileSwitching] = useState<boolean>(false);
+  const { syncProfileTheme } = useTheme();
 
   const {
     connectionState,
@@ -30,11 +37,51 @@ export function App() {
 
   const isConnected = connectionState !== 'disconnected';
 
+  const loadProfiles = useCallback(async () => {
+    if (!isConnected) return;
+    try {
+      const res = await apiClient.getProfiles();
+      if (res.ok && res.data) {
+        setProfiles(res.data.profiles || []);
+        setActiveProfile(res.data.active_profile || null);
+        syncProfileTheme(res.data.active_profile || null);
+      }
+    } catch {
+      // Non-fatal during startup/polling
+    }
+  }, [isConnected, syncProfileTheme]);
+
+  useEffect(() => {
+    loadProfiles();
+  }, [loadProfiles]);
+
+  const handleSwitchProfile = async (profileId: string) => {
+    if (!profileId || profileId === activeProfile?.id) return;
+    setIsProfileSwitching(true);
+    try {
+      const res = await apiClient.activateProfile(profileId);
+      if (res.ok && res.data) {
+        setActiveProfile(res.data);
+        syncProfileTheme(res.data);
+        await loadProfiles();
+      }
+    } finally {
+      setIsProfileSwitching(false);
+    }
+  };
+
+  const handleProfilesChanged = async () => {
+    await loadProfiles();
+  };
+
+  const profileKey = activeProfile?.id || 'default';
+
   const renderContent = () => {
     switch (currentNav) {
       case 'dashboard':
         return (
           <DashboardPage
+            key={`dash-${profileKey}`}
             connectionState={connectionState}
             health={health}
             emergencyStatus={emergencyStatus}
@@ -47,6 +94,7 @@ export function App() {
       case 'agent':
         return (
           <AgentPage
+            key={`agent-${profileKey}`}
             onNavigateToConfirmations={() => setCurrentNav('confirmations')}
             isBackendConnected={isConnected}
           />
@@ -60,6 +108,7 @@ export function App() {
       case 'executions':
         return (
           <ExecutionsPage
+            key={`exec-${profileKey}`}
             isBackendConnected={isConnected}
           />
         );
@@ -86,7 +135,9 @@ export function App() {
       case 'settings':
         return (
           <SettingsPage
+            key={`settings-${profileKey}`}
             isBackendConnected={isConnected}
+            onProfileChanged={handleProfilesChanged}
           />
         );
       default:
@@ -110,8 +161,14 @@ export function App() {
       isLoading={isLoading}
       onRefresh={refetch}
       emergencyStatus={emergencyStatus}
+      profiles={profiles}
+      activeProfile={activeProfile}
+      isProfileSwitching={isProfileSwitching}
+      onSwitchProfile={handleSwitchProfile}
     >
-      {renderContent()}
+      <div key={currentNav} className="page-transition-wrapper">
+        {renderContent()}
+      </div>
     </AppLayout>
   );
 }

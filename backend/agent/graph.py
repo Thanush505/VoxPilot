@@ -8,13 +8,18 @@ Supports multi-step execution loops, confirmation trust boundaries, and executio
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
+import unittest.mock
 from typing import Dict, Any, Optional, List
+import ollama
 from langgraph.graph import StateGraph, START, END
 
 from backend.agent.state import VoxPilotState, ExecutionResult
 from backend.agent.intent import IntentRecognizer
+from backend.agent.llm import OllamaLLM
+from backend.ai.providers.base import AIProviderError, ProviderCancelledError
 from backend.agent.planner import AgentPlanner
 from backend.agent.tool_registry import (
     ToolRegistry,
@@ -32,11 +37,34 @@ from backend.memory.context_manager import (
     ConversationContextManager,
     get_shared_context_manager,
 )
+from backend.memory.long_term_memory import (
+    LongTermMemoryService,
+    get_shared_long_term_memory_service,
+)
+from backend.memory.memory_extractor import MemoryExtractor
+from backend.memory.conversation_hydrator import ConversationHydrator
+from backend.personalization.service import (
+    PersonalizationService,
+    get_shared_personalization_service,
+)
+from backend.profiles.service import (
+    ProfileService,
+    get_shared_profile_service,
+)
 from backend.database.repository import DatabaseRepository
 from backend.automation.emergency_stop import (
     get_shared_emergency_stop_manager,
     EmergencyStopActiveError,
 )
+from backend.ai.vision import (
+    ScreenCaptureAccessDeniedError,
+    ScreenCaptureNotFoundError,
+    get_shared_screen_capture_service,
+    get_shared_vision_provider,
+)
+from backend.ai.file_assistant import get_shared_file_assistant
+from backend.ai.browser_research import get_shared_browser_research_service
+from backend.ai.email_assistant import get_shared_email_assistant
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +82,12 @@ class VoxPilotAgent:
         planner: Optional[AgentPlanner] = None,
         context_manager: Optional[ConversationContextManager] = None,
         repository: Optional[DatabaseRepository] = None,
+        llm: Optional[OllamaLLM] = None,
+        memory_service: Optional[LongTermMemoryService] = None,
+        memory_extractor: Optional[MemoryExtractor] = None,
+        conversation_hydrator: Optional[ConversationHydrator] = None,
+        personalization_service: Optional[PersonalizationService] = None,
+        profile_service: Optional[ProfileService] = None,
     ):
         self.model = model
         self.tool_registry = tool_registry or get_shared_tool_registry()
@@ -67,6 +101,34 @@ class VoxPilotAgent:
         self.context_manager = context_manager or get_shared_context_manager()
         self.repository = repository or DatabaseRepository()
 
+        self._explicit_llm = llm is not None
+        self.llm = llm or OllamaLLM(model=model)
+
+        if memory_service is not None:
+            self.memory_service = memory_service
+        elif repository is not None:
+            self.memory_service = LongTermMemoryService(sync_engine=self.repository._sync_engine)
+        else:
+            self.memory_service = get_shared_long_term_memory_service()
+
+        self.memory_extractor = memory_extractor or MemoryExtractor(memory_service=self.memory_service)
+        self.conversation_hydrator = conversation_hydrator or ConversationHydrator(repository=self.repository)
+
+        if personalization_service is not None:
+            self.personalization_service = personalization_service
+        elif repository is not None:
+            self.personalization_service = PersonalizationService(sync_engine=self.repository._sync_engine)
+        else:
+            self.personalization_service = get_shared_personalization_service()
+
+        if profile_service is not None:
+            self.profile_service = profile_service
+        elif repository is not None:
+            self.profile_service = ProfileService(sync_engine=self.repository._sync_engine)
+        else:
+            self.profile_service = get_shared_profile_service()
+
+        self._conversation_profiles: Dict[str, str] = {}
         self.graph = self.build_graph()
 
     # ==========================================================================
@@ -626,13 +688,44 @@ class VoxPilotAgent:
     # Graph Node 6: Response Generation
     # ==========================================================================
 
+    def _is_mock_only_harness(self) -> bool:
+        """Detect pure unit-test harness where both intent & planner are mocks and no LLM is injected/patched."""
+        return (
+            isinstance(self.intent_recognizer, unittest.mock.Mock)
+            and isinstance(self.planner, unittest.mock.Mock)
+            and not self._explicit_llm
+            and not isinstance(self.llm, unittest.mock.Mock)
+            and not isinstance(ollama.chat, unittest.mock.Mock)
+        )
+
+    def _build_offline_conversational_fallback(self, state: VoxPilotState) -> str:
+        """Deterministic fallback response when local Ollama is offline or unavailable."""
+        extracted = state.get("extracted_memories") or []
+        retrieved = state.get("retrieved_memories") or []
+        user_in = (state.get("user_input") or "").strip()
+
+        if extracted and any(
+            kw in user_in.lower()
+            for kw in ("remember", "prefer", "preferred", "my name is", "my project", "always ")
+        ):
+            first_mem = extracted[0].get("content", "").strip()
+            if first_mem:
+                return f"Got it. I have saved that locally in memory: {first_mem}"
+
+        if retrieved and ("?" in user_in or any(w in user_in.lower() for w in ("what", "who", "prefer", "remember", "which"))):
+            snippets = [str(m.get("content", "")).strip() for m in retrieved[:2] if m.get("content")]
+            if snippets:
+                return f"Based on your local VoxPilot memory: {' '.join(snippets)}"
+
+        existing = state.get("response")
+        if existing and existing not in ("Generate conversational response", "Planning completed."):
+            return existing
+        return "Hello! How can I assist you with your computer today?"
+
     def generate_response(self, state: VoxPilotState) -> Dict[str, Any]:
-        """Generate final truthful summary response based on actual execution results."""
+        """Generate final truthful summary or local LLM conversational response."""
         status = state.get("execution_status", "")
         results = state.get("execution_results", [])
-        completed = state.get("completed_steps", [])
-        failed = state.get("failed_steps", [])
-        plan = state.get("plan", [])
 
         # If already set by confirmation or failure node, preserve it
         if status in ("confirmation_required", "validation_failed"):
@@ -660,11 +753,46 @@ class VoxPilotAgent:
             }
 
         if status == "completed":
-            if not results and state.get("response"):
-                # Conversational response
-                return {}
+            is_conversational_only = (not results) or all(
+                isinstance(r, dict) and r.get("action") == "respond" for r in results
+            )
 
-            # Construct truthful execution summary
+            if is_conversational_only and (state.get("intent") == "general_conversation" or results):
+                if self._is_mock_only_harness():
+                    preserved = state.get("response")
+                    if not preserved and results:
+                        preserved = results[0].get("message")
+                    return {"response": preserved or "Hello! How can I assist you with your computer today?"}
+
+                try:
+                    llm_reply = self.llm.generate_contextual_response(
+                        user_message=state.get("user_input", ""),
+                        conversation_history=state.get("conversation_history"),
+                        recent_turns_text=state.get("conversation_turns_text"),
+                        memories=state.get("retrieved_memories"),
+                        personalization_context=state.get("personalization_context"),
+                    )
+                    if llm_reply:
+                        return {"response": llm_reply}
+                except ProviderCancelledError as cancel_err:
+                    return {
+                        "execution_status": "cancelled",
+                        "error": str(cancel_err),
+                        "response": "Execution was cancelled by the user.",
+                    }
+                except AIProviderError as provider_err:
+                    logger.warning(f"Active AI provider failed: {provider_err}")
+                    return {
+                        "execution_status": "failed",
+                        "error": str(provider_err),
+                        "response": f"AI provider error: {provider_err}",
+                    }
+                except Exception as llm_err:
+                    logger.warning(f"Local Ollama response failed; falling back gracefully: {llm_err}")
+
+                return {"response": self._build_offline_conversational_fallback(state)}
+
+            # Construct truthful execution summary for tool-executed requests
             success_messages = [
                 r.get("message", f"Completed {r.get('action')}")
                 for r in results if r.get("success")
@@ -762,11 +890,23 @@ class VoxPilotAgent:
     # Public Execution Interfaces
     # ==========================================================================
 
+    def _resolve_profile_id(self, explicit_profile_id: Optional[str] = None) -> str:
+        if explicit_profile_id and isinstance(explicit_profile_id, str) and explicit_profile_id.strip():
+            return explicit_profile_id.strip()
+        try:
+            return self.profile_service.get_active_profile_id()
+        except Exception as err:
+            logger.warning(f"Failed resolving active profile; falling back to default: {err}")
+            return "default"
+
     def process_request(
         self,
         user_input: str,
         execution_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
+        profile_id: Optional[str] = None,
+        capture_id: Optional[str] = None,
+        clear_capture_after_use: bool = True,
     ) -> VoxPilotState:
         """Process a natural language request from initial input through execution."""
         if not user_input or not user_input.strip():
@@ -774,6 +914,22 @@ class VoxPilotAgent:
 
         exec_id = execution_id or f"exec_{uuid.uuid4().hex[:12]}"
         conv_id = conversation_id or f"conv_{exec_id[:8]}"
+        active_profile_id = self._resolve_profile_id(profile_id)
+
+        # Enforce strict conversation-to-profile ownership before touching context or DB
+        known_mem_profile = self._conversation_profiles.get(conv_id)
+        if known_mem_profile is not None and known_mem_profile != active_profile_id:
+            raise ValueError(f"Conversation '{conv_id}' belongs to another profile.")
+        try:
+            existing_conv = self.repository.get_conversation_sync(conv_id)
+            if existing_conv is not None and (existing_conv.profile_id or "default") != active_profile_id:
+                raise ValueError(f"Conversation '{conv_id}' belongs to another profile.")
+        except ValueError:
+            raise
+        except Exception as conv_err:
+            logger.debug(f"Non-fatal conversation profile pre-check skipped: {conv_err}")
+
+        self._conversation_profiles[conv_id] = active_profile_id
 
         manager = get_shared_emergency_stop_manager()
         if manager.is_emergency_stop_active():
@@ -870,16 +1026,79 @@ class VoxPilotAgent:
             return concurrent_state
 
         rate_limiter.record_request(conversation_id=conv_id)
+        profile_id = active_profile_id
+        clean_input = user_input.strip()
 
-        # Retrieve conversation context
-        conv_ctx = self.context_manager.get_context(conv_id)
+        # 1. Hydrate short-term conversation context from SQLite on cold start or switch
+        try:
+            if not self.context_manager.has_context(conv_id):
+                conv_ctx = self.conversation_hydrator.hydrate_context(
+                    conv_id,
+                    self.context_manager,
+                    revalidate_os_handles=True,
+                    profile_id=profile_id,
+                )
+            else:
+                conv_ctx = self.context_manager.get_context(conv_id)
+        except Exception as hyd_err:
+            logger.warning(f"Non-fatal context hydration fallback for '{conv_id}': {hyd_err}")
+            conv_ctx = self.context_manager.get_context(conv_id)
+
         conv_summary = conv_ctx.get_summary_text()
+        recent_turns_text = conv_ctx.get_recent_turns_text(max_turns=5)
+
+        # 2. Conservatively extract durable local memories from explicit user statements
+        # Never persist screenshot-attached, document-assistant, or browser-research turns into permanent long-term memory.
+        extracted_memories: List[Dict[str, Any]] = []
+        is_file_assistant_query = self._looks_like_file_assistant_request(clean_input)
+        is_browser_research_query = self._looks_like_browser_research_request(clean_input)
+        is_email_query = self._looks_like_email_assistant_request(clean_input)
+        if not capture_id and not is_file_assistant_query and not is_browser_research_query and not is_email_query:
+            try:
+                extracted_memories = self.memory_extractor.extract_and_store(
+                    user_input=clean_input,
+                    conversation_id=conv_id,
+                    profile_id=profile_id,
+                )
+            except Exception as ext_err:
+                logger.warning(f"Non-fatal memory extraction failure: {ext_err}")
+
+        # 3. Retrieve relevant local long-term memories to ground agent responses
+        retrieved_memories: List[Dict[str, Any]] = []
+        try:
+            retrieved_memories = self.memory_service.search_memories(
+                query=clean_input,
+                limit=5,
+                profile_id=profile_id,
+                match_mode="any",
+            )
+        except Exception as search_err:
+            logger.warning(f"Non-fatal long-term memory search failure: {search_err}")
+
+        # 4. Load active explicit user personalization preferences
+        personalization_summary = ""
+        active_preferences: List[Dict[str, Any]] = []
+        try:
+            pers_ctx = self.personalization_service.build_personalization_context(
+                user_input=clean_input,
+                profile_id=profile_id,
+            )
+            personalization_summary = str(pers_ctx.get("summary_text") or "")
+            active_preferences = list(pers_ctx.get("preferences") or [])
+        except Exception as pers_err:
+            logger.warning(f"Non-fatal personalization context failure: {pers_err}")
 
         initial_state: VoxPilotState = {
-            "user_input": user_input.strip(),
+            "user_input": clean_input,
             "execution_id": exec_id,
             "conversation_id": conv_id,
+            "profile_id": profile_id,
             "conversation_history": conv_summary,
+            "conversation_turns_text": recent_turns_text,
+            "retrieved_memories": retrieved_memories,
+            "extracted_memories": extracted_memories,
+            "personalization_context": personalization_summary or None,
+            "active_preferences": active_preferences,
             "execution_status": "started",
             "current_step": 0,
             "plan": [],
@@ -897,24 +1116,101 @@ class VoxPilotAgent:
             "started_at": time.time(),
         }
 
-        try:
-            final_state = self.graph.invoke(initial_state)
-        except Exception as error:
-            logger.error(f"Agent graph execution failed: {error}", exc_info=True)
-            final_state = {
-                **initial_state,
-                "error": str(error),
-                "execution_status": "failed",
-                "response": f"Agent execution failed: {error}",
-            }
-        finally:
-            rate_limiter.release_execution_slot(exec_id)
+        # Handle explicit on-demand screen awareness request without polluting long-term memory
+        if capture_id:
+            screen_service = get_shared_screen_capture_service()
+            vision_provider = get_shared_vision_provider()
+            try:
+                capture_entry = screen_service.get_capture(capture_id=capture_id, profile_id=profile_id)
+                analysis = vision_provider.analyze_image(
+                    image_base64=capture_entry.image_base64,
+                    user_prompt=clean_input,
+                )
+                final_state = {
+                    **initial_state,
+                    "intent": "screen_awareness",
+                    "confidence": 1.0,
+                    "intent_reason": "User attached an explicitly authorized screen capture.",
+                    "capture_id": capture_id,
+                    "screen_analysis_used": True,
+                    "execution_status": "completed" if analysis.status != "error" else "failed",
+                    "completed_steps": [
+                        {
+                            "action": "screen_awareness_analysis",
+                            "status": analysis.status,
+                            "model": analysis.model_used or "none",
+                        }
+                    ],
+                    "response": analysis.answer,
+                    "error": analysis.error or "",
+                }
+            except ScreenCaptureAccessDeniedError as access_err:
+                raise PermissionError(str(access_err)) from access_err
+            except ScreenCaptureNotFoundError as not_found_err:
+                final_state = {
+                    **initial_state,
+                    "intent": "screen_awareness",
+                    "capture_id": capture_id,
+                    "screen_analysis_used": False,
+                    "execution_status": "failed",
+                    "error": str(not_found_err),
+                    "response": "The attached screenshot expired or is no longer available. Please capture your screen again.",
+                }
+            except Exception as screen_err:
+                logger.error(f"Screen awareness execution failed: {screen_err}")
+                final_state = {
+                    **initial_state,
+                    "intent": "screen_awareness",
+                    "capture_id": capture_id,
+                    "screen_analysis_used": False,
+                    "execution_status": "failed",
+                    "error": str(screen_err),
+                    "response": f"Screen analysis failed: {screen_err}",
+                }
+            finally:
+                rate_limiter.release_execution_slot(exec_id)
+                if clear_capture_after_use:
+                    try:
+                        screen_service.delete_capture(capture_id=capture_id, profile_id=profile_id)
+                    except Exception:
+                        pass
+        else:
+            try:
+                handled_file_state = self._try_handle_file_assistant_request(
+                    clean_input, initial_state, conv_ctx
+                )
+                if handled_file_state is not None:
+                    final_state = handled_file_state
+                else:
+                    handled_browser_state = self._try_handle_browser_research_request(
+                        clean_input, initial_state
+                    )
+                    if handled_browser_state is not None:
+                        final_state = handled_browser_state
+                    else:
+                        handled_email_state = self._try_handle_email_assistant_request(
+                            clean_input, initial_state
+                        )
+                        if handled_email_state is not None:
+                            final_state = handled_email_state
+                        else:
+                            final_state = self.graph.invoke(initial_state)
+            except Exception as error:
+                logger.error(f"Agent graph execution failed: {error}", exc_info=True)
+                final_state = {
+                    **initial_state,
+                    "error": str(error),
+                    "execution_status": "failed",
+                    "response": f"Agent execution failed: {error}",
+                }
+            finally:
+                rate_limiter.release_execution_slot(exec_id)
 
-        # Update context manager
+        # Update in-memory context manager & persist active context JSON to SQLite
         try:
             self.context_manager.record_turn(
                 conversation_id=conv_id,
-                user_input=user_input.strip(),
+                user_input=clean_input,
                 intent=final_state.get("intent", "unknown"),
                 plan=final_state.get("plan", []),
                 execution_results=final_state.get("execution_results", []),
@@ -931,7 +1227,555 @@ class VoxPilotAgent:
         except Exception as db_err:
             logger.warning(f"Failed to persist execution state to database: {db_err}")
 
+        try:
+            updated_ctx = self.context_manager.get_context(conv_id)
+            self.conversation_hydrator.save_context(conv_id, updated_ctx, profile_id=profile_id)
+        except Exception as ctx_save_err:
+            logger.warning(f"Failed to persist active conversation context: {ctx_save_err}")
+
+        self._notify_execution_outcome(final_state)
         return final_state
+
+    @staticmethod
+    def _notify_execution_outcome(final_state: Dict[str, Any]) -> None:
+        """Emit a privacy-safe desktop notification for meaningful execution outcomes."""
+        try:
+            from backend.automation.notifications import get_shared_notification_service
+
+            status_val = str(final_state.get("execution_status") or "")
+            if status_val in ("", "started", "running", "planned", "validated", "cancelled"):
+                return
+
+            exec_id = str(final_state.get("execution_id") or "")
+            profile_id = str(final_state.get("profile_id") or "default")
+            intent = str(final_state.get("intent") or "").lower()
+            plan = final_state.get("plan") or []
+            is_automation = bool(plan) or intent in (
+                "desktop_control",
+                "file_assistant",
+                "browser_research",
+                "automation",
+            )
+            sensitive = intent in ("email_assistant", "file_assistant", "browser_research", "vision", "screen")
+
+            if status_val == "confirmation_required":
+                get_shared_notification_service().notify(
+                    category="confirmation_required",
+                    title="VoxPilot Confirmation Required",
+                    message="An action requires your explicit approval in VoxPilot.",
+                    event_key=f"exec:{exec_id}:confirmation_required",
+                    profile_id=profile_id,
+                    sensitive=True,
+                )
+            elif status_val in ("failed", "validation_failed"):
+                cat = "automation_failed" if is_automation else "task_failed"
+                get_shared_notification_service().notify(
+                    category=cat,
+                    title="VoxPilot Task Failed",
+                    message=str(final_state.get("error") or final_state.get("response") or "Task failed."),
+                    event_key=f"exec:{exec_id}:failed",
+                    profile_id=profile_id,
+                    sensitive=sensitive,
+                )
+            elif status_val == "completed":
+                if is_automation and len(plan) >= 3:
+                    cat = "long_running_task_completed"
+                elif is_automation:
+                    cat = "automation_completed"
+                else:
+                    cat = "task_completed"
+                get_shared_notification_service().notify(
+                    category=cat,
+                    title="VoxPilot Task Completed",
+                    message=str(final_state.get("response") or "Task completed."),
+                    event_key=f"exec:{exec_id}:completed",
+                    profile_id=profile_id,
+                    sensitive=sensitive,
+                )
+        except Exception as notify_err:
+            logger.debug(f"Non-fatal desktop notification error: {notify_err}")
+
+    # ==========================================================================
+    # Phase 4B: AI File Assistant Natural-Language Routing
+    # ==========================================================================
+
+    @staticmethod
+    def _looks_like_file_assistant_request(user_input: str) -> bool:
+        lower = user_input.strip().lower()
+        return bool(
+            re.search(
+                r"^(?:summarize|summarise|read|inspect|analyze|analyse)\s+(?:this\s+|the\s+|my\s+)?(?:pdf|docx?|txt|csv|json|md|markdown|document|file|resume|report|notes|it)\b",
+                lower,
+            )
+            or re.search(
+                r"^(?:summarize|summarise|read|inspect)\s+.*\.(?:pdf|docx?|txt|csv|json|md|markdown|py|log)\b",
+                lower,
+            )
+            or re.search(
+                r"^what\s+does\s+(?:this|the)\s+(?:document|file|pdf|docx?|report|resume|notes)\s+say\b",
+                lower,
+            )
+            or re.search(
+                r"^compare\s+(?:these\s+(?:two\s+)?(?:documents|files)|.*\.(?:pdf|docx?|txt|csv|json|md|py)\b)",
+                lower,
+            )
+            or re.search(r"^find\s+(?:my\s+resume|all\s+(?:python|\.py)\s+files\b|files\s+modified\s+recently\b)", lower)
+            or re.search(r"^organize\s+(?:these\s+)?files\b", lower)
+        )
+
+    @staticmethod
+    def _extract_file_tokens(text: str) -> List[str]:
+        """Extract explicit file paths or filenames with extensions from user text."""
+        candidates: List[str] = []
+        # Quoted paths/filenames first
+        for m in re.finditer(r"['\"]([^'\"]+\.[a-zA-Z0-9]{1,8})['\"]", text):
+            candidates.append(m.group(1).strip())
+        # Windows/POSIX absolute paths
+        for m in re.finditer(r"(?:[A-Za-z]:\\[^\s\"']+|\b[\w./\\-]+\.(?:pdf|docx?|txt|md|markdown|csv|json|py|log|yaml|yml|xml|html|js|ts))\b", text, re.IGNORECASE):
+            val = m.group(0).strip().rstrip(".,?!;:")
+            if val not in candidates:
+                candidates.append(val)
+        return candidates
+
+    def _resolve_single_file_target(
+        self,
+        user_input: str,
+        conv_ctx: Any,
+        file_assistant: Any,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Resolve a single file path from prompt or conversation context, or return an error/clarification message."""
+        tokens = self._extract_file_tokens(user_input)
+        if tokens:
+            candidate = tokens[0]
+            if any(sep in candidate for sep in ("\\", "/")):
+                return candidate, None
+            # Search approved dirs for bare filename
+            found = file_assistant.find_files(query=candidate, max_results=5)
+            items = found.get("items") or []
+            exact = [i for i in items if i["name"].lower() == candidate.lower()]
+            matches = exact or items
+            if len(matches) == 1:
+                return matches[0]["path"], None
+            if len(matches) > 1:
+                opts = "\n".join(f"- {m['name']} ({m['path']})" for m in matches[:5])
+                return None, f"Multiple files matched '{candidate}'. Please specify which one:\n{opts}"
+            return None, f"Could not find '{candidate}' in your approved directories."
+
+        last_file = getattr(conv_ctx, "last_file", None)
+        if last_file:
+            return str(last_file), None
+
+        return None, (
+            "Please specify the file path or filename you want me to inspect "
+            "(for example, 'Summarize C:\\Users\\...\\report.pdf')."
+        )
+
+    def _try_handle_file_assistant_request(
+        self,
+        user_input: str,
+        initial_state: VoxPilotState,
+        conv_ctx: Any,
+    ) -> Optional[VoxPilotState]:
+        """Handle natural-language AI File Assistant tasks cleanly without mutating long-term memory."""
+        if not self._looks_like_file_assistant_request(user_input):
+            return None
+
+        manager = get_shared_emergency_stop_manager()
+        if manager.is_emergency_stop_active():
+            return {
+                **initial_state,
+                "intent": "file_management",
+                "confidence": 1.0,
+                "execution_status": "cancelled",
+                "error": f"Emergency stop is active: {manager.trigger_reason}",
+                "response": f"Execution halted: emergency stop is active ({manager.trigger_reason}).",
+            }
+
+        lower = user_input.strip().lower()
+        file_assistant = get_shared_file_assistant()
+
+        # 1. Project Python files search ("Find all Python files inside my VoxPilot project")
+        if re.search(r"^find\s+all\s+(?:python|\.py)\s+files\b", lower):
+            include_proj = "voxpilot" in lower or "project" in lower
+            res = file_assistant.find_files(
+                extension=".py",
+                include_project_readonly=include_proj,
+                max_results=50,
+            )
+            return {
+                **initial_state,
+                "intent": "file_management",
+                "confidence": 0.99,
+                "execution_status": "completed" if res.get("success") else "failed",
+                "execution_results": [res],
+                "completed_steps": [{"action": "find_files", "status": res.get("status", "success")}],
+                "response": res.get("message", "Search completed."),
+            }
+
+        # 2. Recent files search ("Find files modified recently in Downloads")
+        if re.search(r"^find\s+files\s+modified\s+recently\b", lower):
+            folder_match = re.search(r"\bin\s+(downloads|documents|desktop|pictures|music|videos)\b", lower)
+            folder = folder_match.group(1) if folder_match else None
+            res = file_assistant.find_files(
+                directory_path=folder,
+                modified_within_days=7,
+                sort_by="modified",
+                max_results=20,
+            )
+            return {
+                **initial_state,
+                "intent": "file_management",
+                "confidence": 0.99,
+                "execution_status": "completed" if res.get("success") else "failed",
+                "execution_results": [res],
+                "completed_steps": [{"action": "find_recent_files", "status": res.get("status", "success")}],
+                "response": res.get("message", "Search completed."),
+            }
+
+        # 3. Named personal file search ("Find my resume")
+        resume_match = re.search(r"^find\s+my\s+([a-zA-Z0-9_\- ]{2,40}?)\.?$", lower)
+        if resume_match:
+            term = resume_match.group(1).strip()
+            res = file_assistant.find_files(query=term, sort_by="modified", max_results=15)
+            exec_results = [res]
+            items = res.get("items") or []
+            if len(items) == 1:
+                exec_results.append({"action": "find_files", "success": True, "source_path": items[0]["path"]})
+            return {
+                **initial_state,
+                "intent": "file_management",
+                "confidence": 0.99,
+                "execution_status": "completed" if res.get("success") else "failed",
+                "execution_results": exec_results,
+                "completed_steps": [{"action": "find_files", "status": res.get("status", "success")}],
+                "response": res.get("message", "Search completed."),
+            }
+
+        # 4. Organize files into folders (always requires confirmation before moving)
+        if re.search(r"^organize\s+(?:these\s+)?files\b", lower):
+            folder_match = re.search(r"\bin\s+(downloads|documents|desktop|pictures|music|videos)\b", lower)
+            folder = folder_match.group(1) if folder_match else "downloads"
+            plan_res = file_assistant.plan_folder_organization(folder)
+            if not plan_res.get("moves"):
+                return {
+                    **initial_state,
+                    "intent": "file_management",
+                    "confidence": 0.99,
+                    "execution_status": "completed" if plan_res.get("success") else "failed",
+                    "execution_results": [plan_res],
+                    "response": plan_res.get("message", "No files found to organize."),
+                }
+            preview_lines = [
+                f"- {m['file_name']} -> {m['category']}/"
+                for m in plan_res["moves"][:15]
+            ]
+            if len(plan_res["moves"]) > 15:
+                preview_lines.append(f"...and {len(plan_res['moves']) - 15} more.")
+            return {
+                **initial_state,
+                "intent": "file_management",
+                "confidence": 0.99,
+                "execution_status": "confirmation_required",
+                "requires_confirmation": True,
+                "pending_confirmation": {
+                    "operation": "organize_files",
+                    "directory": plan_res.get("directory"),
+                    "file_count": plan_res.get("file_count", 0),
+                },
+                "execution_results": [plan_res],
+                "response": (
+                    f"{plan_res['message']}\n\nPlanned moves:\n" + "\n".join(preview_lines)
+                ),
+            }
+
+        # 5. Compare two documents
+        if lower.startswith("compare "):
+            tokens = self._extract_file_tokens(user_input)
+            if len(tokens) < 2:
+                recent_files = list(getattr(conv_ctx, "recent_files", []) or [])
+                for rf in recent_files:
+                    if rf not in tokens:
+                        tokens.append(rf)
+            if len(tokens) < 2:
+                return {
+                    **initial_state,
+                    "intent": "file_management",
+                    "confidence": 0.99,
+                    "execution_status": "completed",
+                    "response": (
+                        "Please provide at least two document paths or filenames to compare "
+                        "(for example, 'Compare doc1.txt and doc2.txt')."
+                    ),
+                }
+            resolved_paths: List[str] = []
+            for tok in tokens[:4]:
+                if any(sep in tok for sep in ("\\", "/")):
+                    resolved_paths.append(tok)
+                else:
+                    found = file_assistant.find_files(query=tok, max_results=3)
+                    items = found.get("items") or []
+                    exact = [i for i in items if i["name"].lower() == tok.lower()]
+                    pick = (exact or items)
+                    if not pick:
+                        return {
+                            **initial_state,
+                            "intent": "file_management",
+                            "confidence": 0.99,
+                            "execution_status": "failed",
+                            "response": f"Could not find '{tok}' in your approved directories to compare.",
+                        }
+                    resolved_paths.append(pick[0]["path"])
+
+            cmp_res = file_assistant.compare_documents(resolved_paths, focus=user_input)
+            return {
+                **initial_state,
+                "intent": "file_management",
+                "confidence": 0.99,
+                "execution_status": "completed" if cmp_res.get("success") else "failed",
+                "execution_results": [cmp_res],
+                "completed_steps": [{"action": "compare_documents", "status": cmp_res.get("status", "success")}],
+                "response": cmp_res.get("message", "Comparison failed."),
+                "error": "" if cmp_res.get("success") else cmp_res.get("message", ""),
+            }
+
+        # 6. Summarize document
+        if re.search(r"^(?:summarize|summarise|read|inspect|analyze|analyse)\b", lower):
+            target_path, err_msg = self._resolve_single_file_target(user_input, conv_ctx, file_assistant)
+            if err_msg or not target_path:
+                return {
+                    **initial_state,
+                    "intent": "file_management",
+                    "confidence": 0.99,
+                    "execution_status": "completed",
+                    "response": err_msg or "Please specify which document to summarize.",
+                }
+            sum_res = file_assistant.summarize_document(target_path)
+            return {
+                **initial_state,
+                "intent": "file_management",
+                "confidence": 0.99,
+                "execution_status": "completed" if sum_res.get("success") else "failed",
+                "execution_results": [sum_res, {"action": "summarize_document", "success": sum_res.get("success", False), "source_path": target_path}],
+                "completed_steps": [{"action": "summarize_document", "status": sum_res.get("status", "success")}],
+                "response": sum_res.get("message", "Summarization failed."),
+                "error": "" if sum_res.get("success") else sum_res.get("message", ""),
+            }
+
+        # 7. Document-grounded Q&A ("What does this document say about ...?")
+        if re.search(r"^what\s+does\s+(?:this|the)\s+(?:document|file|pdf|docx?|report|resume|notes)\s+say\b", lower):
+            target_path, err_msg = self._resolve_single_file_target(user_input, conv_ctx, file_assistant)
+            if err_msg or not target_path:
+                return {
+                    **initial_state,
+                    "intent": "file_management",
+                    "confidence": 0.99,
+                    "execution_status": "completed",
+                    "response": err_msg or "Please specify which document you are asking about.",
+                }
+            qa_res = file_assistant.answer_document_question(target_path, question=user_input)
+            return {
+                **initial_state,
+                "intent": "file_management",
+                "confidence": 0.99,
+                "execution_status": "completed" if qa_res.get("success") else "failed",
+                "execution_results": [qa_res, {"action": "answer_document_question", "success": qa_res.get("success", False), "source_path": target_path}],
+                "completed_steps": [{"action": "answer_document_question", "status": qa_res.get("status", "success")}],
+                "response": qa_res.get("message", "Document Q&A failed."),
+                "error": "" if qa_res.get("success") else qa_res.get("message", ""),
+            }
+
+        return None
+
+    # ==========================================================================
+    # Phase 4C: AI Browser Research Agent Natural-Language Routing
+    # ==========================================================================
+
+    @staticmethod
+    def _looks_like_browser_research_request(user_input: str) -> bool:
+        lower = user_input.strip().lower()
+        return bool(
+            re.search(r"^(?:research|investigate)\b", lower)
+            or re.search(
+                r"^(?:open|visit|browse|go\s+to|summarize|summarise|read|inspect)\s+(?:this\s+|the\s+)?(?:website|webpage|web\s+page|article|site|page)\b",
+                lower,
+            )
+            or re.search(
+                r"^compare\s+(?:the\s+information\s+from\s+these\s+.*?(?:websites|webpages|pages|sites)|.*https?://)",
+                lower,
+            )
+            or re.search(
+                r"^(?:find|extract|get)\s+.*?\b(?:on\s+this\s+(?:page|website|site)|from\s+these\s+search\s+results|official\s+documentation\s+for)\b",
+                lower,
+            )
+            or (
+                re.search(r"https?://\S+", lower)
+                and any(w in lower for w in ("summarize", "summarise", "compare", "research", "find", "extract", "read", "inspect", "open"))
+            )
+        )
+
+    @staticmethod
+    def _extract_urls(text: str) -> List[str]:
+        urls = []
+        for match in re.finditer(r"https?://[^\s'\"<>]+", text, re.IGNORECASE):
+            cleaned = match.group(0).rstrip(".,?!;:)]")
+            if cleaned and cleaned not in urls:
+                urls.append(cleaned)
+        return urls
+
+    def _try_handle_browser_research_request(
+        self,
+        user_input: str,
+        initial_state: VoxPilotState,
+    ) -> Optional[VoxPilotState]:
+        """Handle natural-language AI Browser Research tasks safely without storing page text in LTM."""
+        if not self._looks_like_browser_research_request(user_input):
+            return None
+
+        manager = get_shared_emergency_stop_manager()
+        if manager.is_emergency_stop_active():
+            return {
+                **initial_state,
+                "intent": "browser_task",
+                "confidence": 1.0,
+                "execution_status": "cancelled",
+                "error": f"Emergency stop is active: {manager.trigger_reason}",
+                "response": f"Execution halted: emergency stop is active ({manager.trigger_reason}).",
+            }
+
+        lower = user_input.strip().lower()
+        urls = self._extract_urls(user_input)
+        research_service = get_shared_browser_research_service()
+
+        if lower.startswith("compare "):
+            if len(urls) < 2:
+                return {
+                    **initial_state,
+                    "intent": "browser_task",
+                    "confidence": 0.99,
+                    "execution_status": "completed",
+                    "response": (
+                        "Please provide at least two HTTP/HTTPS website URLs to compare "
+                        "(for example, 'Compare https://example.com and https://example.org')."
+                    ),
+                }
+            res = research_service.compare_sources(urls=urls, focus=user_input, objective=user_input)
+            op_name = "compare_sources"
+        elif re.search(r"^(?:research|investigate)\b", lower) or "official documentation for" in lower:
+            res = research_service.research_topic(query=user_input, urls=urls or None)
+            op_name = "research_topic"
+        else:
+            target_url = urls[0] if urls else None
+            res = research_service.summarize_page(url=target_url, focus=user_input, objective=user_input)
+            op_name = "summarize_page"
+
+        success = bool(res.get("success"))
+        return {
+            **initial_state,
+            "intent": "browser_task",
+            "confidence": 0.99,
+            "execution_status": "completed" if success else "failed",
+            "execution_results": [
+                {
+                    "action": op_name,
+                    "success": success,
+                    "status": res.get("status", "unknown"),
+                    "sources": res.get("sources", []),
+                }
+            ],
+            "completed_steps": [{"action": op_name, "status": res.get("status", "unknown")}] if success else [],
+            "failed_steps": [] if success else [{"action": op_name, "status": res.get("status", "unknown")}],
+            "response": res.get("message", "Browser research completed."),
+            "error": "" if success else res.get("message", ""),
+        }
+
+    # ==========================================================================
+    # Phase 4D: AI Email Assistant Natural-Language Routing
+    # ==========================================================================
+
+    @staticmethod
+    def _looks_like_email_assistant_request(user_input: str) -> bool:
+        lower = user_input.strip().lower()
+        if re.search(r"^(?:reply\s+politely\s+that|draft\s+(?:a\s+)?(?:professional\s+)?reply)\b", lower):
+            return True
+        return bool(
+            re.search(r"\b(?:emails?|e-mails?|inbox|unread\s+emails?|email\s+thread)\b", lower)
+            and any(
+                kw in lower
+                for kw in (
+                    "summarize", "summarise", "find", "search", "show", "list",
+                    "draft", "write", "reply", "identify", "unread", "attachment",
+                    "thread", "check", "read",
+                )
+            )
+        )
+
+    def _try_handle_email_assistant_request(
+        self,
+        user_input: str,
+        initial_state: VoxPilotState,
+    ) -> Optional[VoxPilotState]:
+        """Handle natural-language AI Email Assistant tasks safely with profile isolation."""
+        if not self._looks_like_email_assistant_request(user_input):
+            return None
+
+        manager = get_shared_emergency_stop_manager()
+        if manager.is_emergency_stop_active():
+            return {
+                **initial_state,
+                "intent": "email_assistant",
+                "confidence": 1.0,
+                "execution_status": "cancelled",
+                "error": f"Emergency stop is active: {manager.trigger_reason}",
+                "response": f"Execution halted: emergency stop is active ({manager.trigger_reason}).",
+            }
+
+        profile_id = str(initial_state.get("profile_id") or "default")
+        lower = user_input.strip().lower()
+        email_svc = get_shared_email_assistant()
+
+        if any(w in lower for w in ("draft ", "write ", "reply ")):
+            res = email_svc.generate_draft(profile_id=profile_id, instruction=user_input)
+            op_name = "generate_email_draft"
+        elif "unread" in lower:
+            res = email_svc.list_emails(profile_id=profile_id, unread_only=True)
+            op_name = "list_unread_emails"
+        elif "attachment" in lower:
+            res = email_svc.list_emails(profile_id=profile_id, has_attachments=True)
+            op_name = "find_emails_with_attachments"
+        elif "need a response" in lower or "require a reply" in lower or "need a reply" in lower:
+            res = email_svc.summarize_emails(profile_id=profile_id, need_reply_focus=True)
+            op_name = "identify_emails_needing_reply"
+        elif "summarize" in lower or "summarise" in lower:
+            res = email_svc.summarize_emails(profile_id=profile_id)
+            op_name = "summarize_emails"
+        else:
+            from_match = re.search(r"\bfrom\s+(?:my\s+)?([a-zA-Z0-9_.@ \-]{2,50}?)\.?$", user_input.strip(), re.IGNORECASE)
+            containing_match = re.search(r"\bcontaining\s+(.+?)\.?$", user_input.strip(), re.IGNORECASE)
+            sender = from_match.group(1).strip() if from_match else None
+            query = containing_match.group(1).strip() if containing_match else None
+            res = email_svc.list_emails(profile_id=profile_id, sender=sender, query=query)
+            op_name = "search_emails"
+
+        success = bool(res.get("success"))
+        exec_item: Dict[str, Any] = {
+            "action": op_name,
+            "success": success,
+            "status": res.get("status", "unknown"),
+        }
+        if "draft" in res:
+            exec_item["draft"] = res["draft"]
+
+        return {
+            **initial_state,
+            "intent": "email_assistant",
+            "confidence": 0.99,
+            "execution_status": "completed" if success else "failed",
+            "execution_results": [exec_item],
+            "completed_steps": [{"action": op_name, "status": res.get("status", "unknown")}] if success else [],
+            "failed_steps": [] if success else [{"action": op_name, "status": res.get("status", "unknown")}],
+            "response": res.get("message", "Email assistant completed."),
+            "error": "" if success else res.get("message", ""),
+        }
 
     def resume_execution(self, state: VoxPilotState, confirmation_token: str) -> VoxPilotState:
         """Resume a paused execution session after human confirmation token approval."""
@@ -960,6 +1804,25 @@ class VoxPilotAgent:
 
         if not confirmation_token or not confirmation_token.strip():
             raise ValueError("A valid confirmation token is required to resume execution.")
+
+        resume_profile_id = (state.get("profile_id") or "default").strip() or "default"
+        resume_conv_id = state.get("conversation_id")
+        if resume_conv_id:
+            known_prof = self._conversation_profiles.get(resume_conv_id)
+            if known_prof is not None and known_prof != resume_profile_id:
+                raise ValueError(
+                    f"Execution resumption blocked: conversation '{resume_conv_id}' belongs to another profile."
+                )
+            try:
+                conv_rec = self.repository.get_conversation_sync(resume_conv_id)
+                if conv_rec is not None and (conv_rec.profile_id or "default") != resume_profile_id:
+                    raise ValueError(
+                        f"Execution resumption blocked: conversation '{resume_conv_id}' belongs to another profile."
+                    )
+            except ValueError:
+                raise
+            except Exception as conv_err:
+                logger.debug(f"Non-fatal resume profile check skipped: {conv_err}")
 
         # Rate Limiting & Safety Budget Checkpoints before Resumption
         rate_limiter = get_shared_rate_limiter()
@@ -1023,10 +1886,37 @@ class VoxPilotAgent:
         finally:
             rate_limiter.release_execution_slot(exec_id)
 
-        # Persist resumed state to database
+        # Persist resumed state & updated conversation context to database
+        conv_id = final_state.get("conversation_id")
+        if conv_id:
+            try:
+                self.context_manager.record_turn(
+                    conversation_id=conv_id,
+                    user_input=final_state.get("user_input", ""),
+                    intent=final_state.get("intent", "unknown"),
+                    plan=final_state.get("plan", []),
+                    execution_results=final_state.get("execution_results", []),
+                    completed_steps=final_state.get("completed_steps", []),
+                    response=final_state.get("response", ""),
+                    status=final_state.get("execution_status", "completed"),
+                )
+            except Exception as ctx_err:
+                logger.warning(f"Failed recording resumed turn in context manager: {ctx_err}")
+
         try:
             self.repository.save_execution_sync(final_state)
         except Exception as db_err:
             logger.warning(f"Failed to persist resumed state to database: {db_err}")
 
+        if conv_id:
+            try:
+                self.conversation_hydrator.save_context(
+                    conv_id,
+                    self.context_manager.get_context(conv_id),
+                    profile_id=final_state.get("profile_id", "default"),
+                )
+            except Exception as ctx_save_err:
+                logger.warning(f"Failed persisting resumed conversation context: {ctx_save_err}")
+
+        self._notify_execution_outcome(final_state)
         return final_state

@@ -36,12 +36,21 @@ try:
 except ImportError:
     psutil = None  # type: ignore
 
+from backend.automation.application_discovery import (
+    PROHIBITED_EXECUTABLES,
+    get_shared_discovery_service,
+    is_suspicious_or_temporary_path,
+)
 from backend.automation.application_launcher import (
     ApplicationConfig,
     ApplicationRegistry,
     ApplicationNotAllowedError,
     DEFAULT_APPROVED_APPLICATIONS,
     is_path_in_approved_directories,
+)
+from backend.automation.emergency_stop import (
+    EmergencyStopActiveError,
+    get_shared_emergency_stop_manager,
 )
 
 logger = logging.getLogger(__name__)
@@ -403,6 +412,23 @@ class WindowManager:
                         child_pid, child_exe = calc_hosted
                         return (config.app_id, config.display_name, child_pid, "CalculatorApp.exe", str(child_exe))
 
+        # 3. Safely discovered, non-prohibited desktop applications
+        if norm_proc_name not in PROHIBITED_EXECUTABLES and not is_suspicious_or_temporary_path(exe_path):
+            try:
+                discovery = get_shared_discovery_service()
+                if discovery._loaded:
+                    for entry in discovery.list_applications(limit=500):
+                        if entry.launch_type == "system_utility" or not entry.executable_path:
+                            continue
+                        try:
+                            entry_exe = Path(entry.executable_path).resolve()
+                        except Exception:
+                            continue
+                        if entry_exe == exe_path or entry_exe.name.lower() == norm_proc_name:
+                            return (entry.app_id, entry.display_name, pid, proc_name, str(exe_path))
+            except Exception as disc_err:
+                logger.debug(f"Discovery window ownership fallback skipped: {disc_err}")
+
         raise WindowNotAllowedError(
             f"Window {hwnd} (PID {pid}, '{proc_name}', '{exe_path}') does not belong to an approved application."
         )
@@ -481,8 +507,19 @@ class WindowManager:
         target_app_id: Optional[str] = None
         if app_name is not None:
             # Resolves query or raises ApplicationNotAllowedError
-            resolved_config = self._registry.resolve(app_name)
-            target_app_id = resolved_config.app_id
+            try:
+                resolved_config = self._registry.resolve(app_name)
+                target_app_id = resolved_config.app_id
+            except ApplicationNotAllowedError:
+                discovery = get_shared_discovery_service()
+                if discovery._loaded:
+                    res = discovery.resolve_query(app_name)
+                    if res.get("status") == "resolved":
+                        target_app_id = res["match"].app_id
+                    else:
+                        raise
+                else:
+                    raise
 
         regex: Optional[re.Pattern] = None
         if title_pattern:
@@ -648,6 +685,107 @@ class WindowManager:
         except Exception as err:
             raise WindowOperationError(f"Failed to restore window {hwnd}: {err}")
 
+    def get_active_window(self) -> Optional[WindowInfo]:
+        """Return validated WindowInfo for the current foreground window if approved."""
+        if win32gui is None:
+            raise WindowManagerError("win32gui is unavailable.")
+        fg_hwnd = win32gui.GetForegroundWindow()
+        if not fg_hwnd:
+            return None
+        try:
+            return self.get_window_info(int(fg_hwnd))
+        except (WindowNotFoundError, WindowNotAllowedError):
+            return None
+
+    def close_window(self, hwnd: int) -> bool:
+        """Politely close an approved window via WM_CLOSE (never force-kills processes)."""
+        if get_shared_emergency_stop_manager().is_emergency_stop_active():
+            raise EmergencyStopActiveError("Cannot close window: emergency stop is active.")
+
+        self.validate_window_ownership(hwnd)
+        if not self.is_window_responsive(hwnd):
+            raise WindowOperationError(f"Window {hwnd} is unresponsive/hung and cannot be closed safely.")
+
+        if win32gui is None or win32con is None:
+            raise WindowManagerError("win32gui is unavailable.")
+
+        try:
+            win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+            return True
+        except Exception as err:
+            raise WindowOperationError(f"Failed to send close message to window {hwnd}: {err}")
+
+    def minimize_all_windows(self) -> int:
+        """Minimize all currently visible, non-minimized approved windows."""
+        if get_shared_emergency_stop_manager().is_emergency_stop_active():
+            raise EmergencyStopActiveError("Cannot minimize windows: emergency stop is active.")
+
+        windows = self.find_windows(visible_only=True)
+        minimized = 0
+        for win in windows:
+            if win.is_minimized:
+                continue
+            try:
+                if self.minimize_window(win.hwnd):
+                    minimized += 1
+            except WindowManagerError:
+                continue
+        return minimized
+
+    def arrange_windows(self, layout: str = "tile") -> int:
+        """Arrange visible, non-minimized approved windows cleanly on the primary monitor."""
+        if get_shared_emergency_stop_manager().is_emergency_stop_active():
+            raise EmergencyStopActiveError("Cannot arrange windows: emergency stop is active.")
+        if win32gui is None or win32con is None or win32api is None:
+            raise WindowManagerError("win32gui/win32api is unavailable.")
+
+        windows = [w for w in self.find_windows(visible_only=True) if not w.is_minimized]
+        if not windows:
+            return 0
+
+        try:
+            primary_mon = win32api.MonitorFromPoint((0, 0), win32con.MONITOR_DEFAULTTOPRIMARY)
+            mon_info = win32api.GetMonitorInfo(primary_mon)
+            left, top, right, bottom = mon_info["Work"]
+        except Exception:
+            left, top, right, bottom = 0, 0, 1920, 1040
+
+        work_w = max(320, right - left)
+        work_h = max(240, bottom - top)
+        arranged = 0
+
+        if layout.strip().lower() == "cascade":
+            step = 36
+            win_w = int(work_w * 0.72)
+            win_h = int(work_h * 0.72)
+            for idx, win in enumerate(windows):
+                self.validate_window_ownership(win.hwnd)
+                if win.is_maximized:
+                    win32gui.ShowWindow(win.hwnd, win32con.SW_RESTORE)
+                x = left + (idx * step) % max(40, work_w - win_w)
+                y = top + (idx * step) % max(40, work_h - win_h)
+                win32gui.SetWindowPos(win.hwnd, 0, x, y, win_w, win_h, win32con.SWP_NOZORDER)
+                arranged += 1
+            return arranged
+
+        # Default: side-by-side grid/tile layout
+        cols = 1 if len(windows) == 1 else (2 if len(windows) <= 4 else 3)
+        rows = (len(windows) + cols - 1) // cols
+        cell_w = work_w // cols
+        cell_h = work_h // rows
+
+        for idx, win in enumerate(windows):
+            self.validate_window_ownership(win.hwnd)
+            if win.is_maximized:
+                win32gui.ShowWindow(win.hwnd, win32con.SW_RESTORE)
+            col = idx % cols
+            row = idx // cols
+            x = left + col * cell_w
+            y = top + row * cell_h
+            win32gui.SetWindowPos(win.hwnd, 0, x, y, cell_w, cell_h, win32con.SWP_NOZORDER)
+            arranged += 1
+        return arranged
+
     def manage_window(
         self,
         action: str,
@@ -657,43 +795,40 @@ class WindowManager:
         """High-level window management dispatcher supporting action dispatch and ambiguity detection.
 
         Args:
-            action: Window action to execute ('activate', 'minimize', 'maximize', 'restore').
+            action: Window action to execute ('activate', 'minimize', 'maximize', 'restore', 'close').
             hwnd: Optional explicit window handle.
             app_name: Optional application name used when hwnd is not supplied.
-
-        Returns:
-            WindowInfo: Updated metadata for the managed window.
-
-        Raises:
-            WindowAmbiguityError: When app_name resolves to multiple windows and no hwnd is provided.
-            WindowNotFoundError: When no matching window is found.
-            WindowNotAllowedError: When the target is not approved.
-            WindowManagerError: On invalid arguments or unsupported actions.
         """
         norm_action = action.strip().lower()
-        if norm_action not in {"activate", "minimize", "maximize", "restore"}:
+        if norm_action not in {"activate", "minimize", "maximize", "restore", "close"}:
             raise WindowManagerError(f"Unsupported window action: '{action}'.")
 
         target_hwnd = hwnd
         if target_hwnd is None:
             if not app_name:
-                raise WindowManagerError("Either hwnd or app_name must be provided to manage_window.")
+                if norm_action == "close":
+                    active = self.get_active_window()
+                    if active is None:
+                        raise WindowNotFoundError("No active approved window found to close.")
+                    target_hwnd = active.hwnd
+                else:
+                    raise WindowManagerError("Either hwnd or app_name must be provided to manage_window.")
+            else:
+                # Search for visible windows matching app_name first, then all if none visible
+                matching = self.find_windows(app_name=app_name, visible_only=True)
+                if not matching:
+                    matching = self.find_windows(app_name=app_name, visible_only=False)
 
-            # Search for visible windows matching app_name first, then all if none visible
-            matching = self.find_windows(app_name=app_name, visible_only=True)
-            if not matching:
-                matching = self.find_windows(app_name=app_name, visible_only=False)
+                if not matching:
+                    raise WindowNotFoundError(f"No windows found for application '{app_name}'.")
 
-            if not matching:
-                raise WindowNotFoundError(f"No windows found for application '{app_name}'.")
+                if len(matching) > 1:
+                    raise WindowAmbiguityError(
+                        f"Multiple windows ({len(matching)}) found for '{app_name}'. Please specify an explicit hwnd.",
+                        matching_windows=matching,
+                    )
 
-            if len(matching) > 1:
-                raise WindowAmbiguityError(
-                    f"Multiple windows ({len(matching)}) found for '{app_name}'. Please specify an explicit hwnd.",
-                    matching_windows=matching,
-                )
-
-            target_hwnd = matching[0].hwnd
+                target_hwnd = matching[0].hwnd
         else:
             # HWND is provided: if app_name is also provided, validate that the HWND actually belongs to app_name
             if app_name is not None:
@@ -718,5 +853,9 @@ class WindowManager:
             self.maximize_window(target_hwnd)
         elif norm_action == "restore":
             self.restore_window(target_hwnd)
+        elif norm_action == "close":
+            pre_close = self.get_window_info(target_hwnd)
+            self.close_window(target_hwnd)
+            return pre_close
 
         return self.get_window_info(target_hwnd)

@@ -91,7 +91,7 @@ class ManageWindowInput(BaseModel):
     """Pydantic input schema for window management operations."""
     action: str = Field(
         ...,
-        description="Management action to execute: 'activate', 'minimize', 'maximize', 'restore'.",
+        description="Management action: 'activate', 'minimize', 'maximize', 'restore', 'close', 'get_active', 'minimize_all', 'arrange'.",
     )
     hwnd: Optional[int] = Field(
         None,
@@ -102,13 +102,20 @@ class ManageWindowInput(BaseModel):
         description="Optional application name to target if hwnd is not provided. Fails with ambiguity if multiple windows exist.",
         max_length=100,
     )
+    layout: Optional[str] = Field(
+        "tile",
+        description="Optional layout for 'arrange' action ('tile' or 'cascade').",
+    )
 
     @field_validator("action")
     @classmethod
     def validate_action(cls, value: str) -> str:
         cleaned = value.strip().lower()
-        if cleaned not in {"activate", "minimize", "maximize", "restore"}:
-            raise ValueError(f"Action '{value}' is invalid. Allowed actions: 'activate', 'minimize', 'maximize', 'restore'.")
+        allowed = {"activate", "minimize", "maximize", "restore", "close", "get_active", "minimize_all", "arrange"}
+        if cleaned not in allowed:
+            raise ValueError(
+                f"Action '{value}' is invalid. Allowed actions: {sorted(allowed)}."
+            )
         return cleaned
 
     @field_validator("hwnd")
@@ -136,6 +143,8 @@ class ManageWindowInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_target(self) -> "ManageWindowInput":
+        if self.action in {"get_active", "minimize_all", "arrange", "close"}:
+            return self
         if self.hwnd is None and not self.application_name:
             raise ValueError("Either 'hwnd' or 'application_name' must be provided to manage a window.")
         return self
@@ -233,18 +242,65 @@ def manage_window_tool(
     active_mgr = manager if manager is not None else WindowManager()
 
     try:
+        if data.action == "get_active":
+            active = active_mgr.get_active_window()
+            if active is None:
+                return ManageWindowResult(
+                    success=True,
+                    action=data.action,
+                    window=None,
+                    matching_windows=None,
+                    status="no_active_approved_window",
+                    message="No approved foreground window is currently active.",
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                )
+            return ManageWindowResult(
+                success=True,
+                action=data.action,
+                window=active.to_dict(),
+                matching_windows=None,
+                status="success",
+                message=f"Active window is '{active.title}' ({active.display_name}, HWND {active.hwnd}).",
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+
+        if data.action == "minimize_all":
+            count = active_mgr.minimize_all_windows()
+            return ManageWindowResult(
+                success=True,
+                action=data.action,
+                window=None,
+                matching_windows=None,
+                status="success",
+                message=f"Minimized {count} approved open window(s).",
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+
+        if data.action == "arrange":
+            count = active_mgr.arrange_windows(layout=data.layout or "tile")
+            return ManageWindowResult(
+                success=True,
+                action=data.action,
+                window=None,
+                matching_windows=None,
+                status="success",
+                message=f"Arranged {count} open window(s) in '{data.layout or 'tile'}' layout.",
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+
         updated_info = active_mgr.manage_window(
             action=data.action,
             hwnd=data.hwnd,
             app_name=data.application_name,
         )
+        verb = "closed" if data.action == "close" else f"{data.action}d"
         return ManageWindowResult(
             success=True,
             action=data.action,
             window=updated_info.to_dict(),
             matching_windows=None,
             status="success",
-            message=f"Window {updated_info.hwnd} ('{updated_info.title}') successfully {data.action}d.",
+            message=f"Window {updated_info.hwnd} ('{updated_info.title}') successfully {verb}.",
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
 

@@ -194,7 +194,7 @@ export interface AuditExportResponse {
 /**
  * Voice Mode & Customizable Global Shortcut Types
  */
-export type VoicePhase = 'idle' | 'listening' | 'transcribing' | 'processing' | 'speaking' | 'error';
+export type VoicePhase = 'idle' | 'listening' | 'transcribing' | 'processing' | 'speaking' | 'interrupted' | 'error';
 
 export interface VoiceSettings {
   shortcut_enabled: boolean;
@@ -203,6 +203,8 @@ export interface VoiceSettings {
   tts_enabled: boolean;
   piper_voice: string;
   streaming_vad_enabled: boolean;
+  wake_word_enabled?: boolean;
+  wake_word_cooldown_seconds?: number;
 }
 
 export interface VoiceShortcutStatus {
@@ -267,6 +269,8 @@ export interface VoiceStatusResponse {
   is_active: boolean;
   phase: VoicePhase;
   is_recording: boolean;
+  is_ptt_active?: boolean;
+  wake_word_enabled?: boolean;
   conversation_id: string | null;
   last_transcript: string | null;
   last_response: string | null;
@@ -475,4 +479,643 @@ export interface DirectLaunchResponse {
   candidates?: string[];
   message: string;
   timestamp?: string;
+}
+
+/**
+ * Hardware Monitor & Local AI Model Lifecycle Types (Phase 1A)
+ */
+export interface CpuMetrics {
+  utilization_percent: number;
+  logical_cores: number;
+  physical_cores: number | null;
+  frequency_mhz: number | null;
+  min_frequency_mhz: number | null;
+  max_frequency_mhz: number | null;
+  temperature_celsius: number | null;
+  temperature_available: boolean;
+}
+
+export interface RamMetrics {
+  total_bytes: number;
+  used_bytes: number;
+  available_bytes: number;
+  total_gb: number;
+  used_gb: number;
+  available_gb: number;
+  utilization_percent: number;
+}
+
+export interface GpuMetrics {
+  available: boolean;
+  name: string | null;
+  utilization_percent: number | null;
+  temperature_celsius: number | null;
+  vram_total_mb: number | null;
+  vram_used_mb: number | null;
+  vram_free_mb: number | null;
+  vram_utilization_percent: number | null;
+  status_reason: string | null;
+}
+
+export interface OllamaInstalledModel {
+  name: string;
+  model: string;
+  size_bytes: number;
+  size_gb: number;
+  digest: string | null;
+  modified_at: string | null;
+  family: string | null;
+  families: string[];
+  parameter_size: string | null;
+  quantization_level: string | null;
+  format: string | null;
+}
+
+export interface OllamaRunningModel {
+  name: string;
+  model: string;
+  size_bytes: number;
+  size_gb: number;
+  size_vram_bytes: number;
+  size_vram_mb: number;
+  vram_percent: number | null;
+  digest: string | null;
+  expires_at: string | null;
+  parameter_size: string | null;
+  quantization_level: string | null;
+  context_length: number | null;
+}
+
+export interface OllamaTelemetry {
+  reachable: boolean;
+  base_url: string;
+  installed_models: OllamaInstalledModel[];
+  running_models: OllamaRunningModel[];
+  installed_count: number;
+  running_count: number;
+  error: string | null;
+}
+
+export interface SystemHardwareResponse {
+  timestamp: string;
+  os_name: string;
+  os_version: string;
+  os_release: string;
+  machine: string;
+  cpu: CpuMetrics;
+  ram: RamMetrics;
+  gpu: GpuMetrics;
+  ollama: OllamaTelemetry;
+}
+
+export interface SystemModelsResponse {
+  reachable: boolean;
+  base_url: string;
+  default_model: string;
+  active_model: string;
+  installed_models: OllamaInstalledModel[];
+  running_models: OllamaRunningModel[];
+  installed_count: number;
+  running_count: number;
+  error: string | null;
+}
+
+export interface RunningModelsResponse {
+  reachable: boolean;
+  base_url: string;
+  default_model: string;
+  active_model: string;
+  running_models: OllamaRunningModel[];
+  running_count: number;
+  error: string | null;
+}
+
+export interface ModelOperationResponse {
+  success: boolean;
+  action: string;
+  model: string;
+  active_model: string | null;
+  default_model: string;
+  already_loaded?: boolean | null;
+  was_running?: boolean | null;
+  unloaded_models: string[];
+  keep_alive?: string | null;
+  message: string;
+  timestamp: string;
+}
+
+/**
+ * Local Persistent AI Memory Management Types (Phase 1B)
+ */
+export type MemoryType =
+  | 'user_preference'
+  | 'user_fact'
+  | 'instruction'
+  | 'project_context'
+  | 'general_context';
+
+export interface MemoryItem {
+  id: string;
+  memory_id: string;
+  profile_id: string;
+  memory_type: MemoryType | string;
+  content: string;
+  normalized_content: string;
+  source_conversation_id: string | null;
+  importance: number;
+  created_at: string | null;
+  updated_at: string | null;
+  last_accessed_at: string | null;
+  metadata: Record<string, unknown>;
+  deduplicated?: boolean | null;
+}
+
+export interface MemoryListResponse {
+  memories: MemoryItem[];
+  total: number;
+  limit: number;
+  offset: number;
+  local_only: boolean;
+}
+
+export interface MemorySearchResponse {
+  query: string;
+  memories: MemoryItem[];
+  count: number;
+  local_only: boolean;
+}
+
+export interface MemoryCreateRequest {
+  content: string;
+  memory_type?: MemoryType | string;
+  importance?: number;
+  profile_id?: string;
+  source_conversation_id?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface MemoryUpdateRequest {
+  content?: string;
+  memory_type?: MemoryType | string;
+  importance?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface MemoryDeleteResponse {
+  status: string;
+  deleted: boolean;
+  memory_id: string;
+}
+
+// ============================================================================
+// Personalization Types (Phase 2A)
+// ============================================================================
+
+export type PreferenceCategory =
+  | 'communication'
+  | 'response_format'
+  | 'technical'
+  | 'workflow'
+  | 'ai_behavior'
+  | 'interface';
+
+export interface PreferenceItem {
+  id: string;
+  preference_id: string;
+  profile_id: string;
+  category: PreferenceCategory | string;
+  key: string;
+  normalized_key: string;
+  value: string;
+  description?: string | null;
+  enabled: boolean;
+  priority: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface PreferenceListResponse {
+  preferences: PreferenceItem[];
+  total: number;
+  limit: number;
+  offset: number;
+  categories: string[];
+}
+
+export interface PreferenceCreateRequest {
+  category: PreferenceCategory | string;
+  key: string;
+  value: string;
+  description?: string | null;
+  enabled?: boolean;
+  priority?: number;
+  profile_id?: string;
+  metadata?: Record<string, unknown>;
+  upsert?: boolean;
+}
+
+export interface PreferenceUpdateRequest {
+  category?: PreferenceCategory | string;
+  key?: string;
+  value?: string;
+  description?: string | null;
+  enabled?: boolean;
+  priority?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface PreferenceDeleteResponse {
+  deleted: boolean;
+  preference_id: string;
+}
+
+// ============================================================================
+// Multi-Profile Types (Phase 2B)
+// ============================================================================
+
+export type ProfileAvatar =
+  | 'user'
+  | 'briefcase'
+  | 'graduation-cap'
+  | 'code'
+  | 'home'
+  | 'sparkles';
+
+export type ThemeMode = 'dark' | 'light' | 'system';
+
+export type AccentColorId =
+  | 'blue'
+  | 'indigo'
+  | 'emerald'
+  | 'teal'
+  | 'amber'
+  | 'rose';
+
+export interface ProfileItem {
+  id: string;
+  profile_id: string;
+  name: string;
+  normalized_name: string;
+  description?: string | null;
+  avatar: ProfileAvatar | string;
+  theme_mode?: ThemeMode | string;
+  accent_color?: AccentColorId | string;
+  is_active: boolean;
+  is_default: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface ProfileListResponse {
+  profiles: ProfileItem[];
+  active_profile: ProfileItem;
+  total: number;
+  avatars: string[];
+  theme_modes?: string[];
+  accent_colors?: string[];
+}
+
+export interface ProfileCreateRequest {
+  name: string;
+  description?: string | null;
+  avatar?: ProfileAvatar | string;
+  theme_mode?: ThemeMode | string;
+  accent_color?: AccentColorId | string;
+  activate?: boolean;
+}
+
+export interface ProfileUpdateRequest {
+  name?: string;
+  description?: string | null;
+  avatar?: ProfileAvatar | string;
+  theme_mode?: ThemeMode | string;
+  accent_color?: AccentColorId | string;
+}
+
+export interface ProfileDeleteResponse {
+  deleted: boolean;
+  profile_id: string;
+  active_profile_id: string;
+}
+
+/**
+ * Screen Awareness & Local Vision Types
+ */
+export interface VisionModelRecommendation {
+  name: string;
+  display_name: string;
+  storage_gb: number;
+  vram_gb: number;
+  ram_gb: number;
+  fits_hardware: boolean;
+  hardware_note: string;
+  pull_command: string;
+  notes: string;
+}
+
+export interface VisionAvailabilityStatus {
+  vision_available: boolean;
+  active_vision_model: string | null;
+  installed_vision_models: string[];
+  default_text_model: string;
+  default_text_model_supports_vision: boolean;
+  ollama_reachable: boolean;
+  vram_total_mb: number | null;
+  vram_free_mb: number | null;
+  ram_free_gb: number | null;
+  message: string;
+  recommendations: VisionModelRecommendation[];
+}
+
+export interface ScreenCaptureResponse {
+  capture_id: string;
+  profile_id: string;
+  width: number;
+  height: number;
+  mime_type: string;
+  size_bytes: number;
+  created_at: string;
+  monitor_note: string;
+  ephemeral: boolean;
+  preview_data_url?: string;
+  vision_status?: VisionAvailabilityStatus;
+}
+
+// ============================================================================
+// AI Email Assistant Types (Phase 4D)
+// ============================================================================
+
+export interface EmailAccountPublicConfig {
+  profile_id: string;
+  email_address: string;
+  imap_host: string;
+  imap_port: number;
+  smtp_host: string;
+  smtp_port: number;
+  use_starttls: boolean;
+  display_name: string;
+  authorized_by_user: boolean;
+  connected: boolean;
+}
+
+export interface EmailAccountStatusResponse {
+  connected: boolean;
+  profile_id: string;
+  account: EmailAccountPublicConfig | null;
+}
+
+export interface EmailDraftItem {
+  draft_id: string;
+  profile_id: string;
+  to: string[];
+  cc: string[];
+  subject: string;
+  body: string;
+  in_reply_to?: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EmailDraftSendConfirmationResponse {
+  success: boolean;
+  requires_confirmation: boolean;
+  confirmation_token: string;
+  status: string;
+  draft: EmailDraftItem;
+  message: string;
+}
+
+// ============================================================================
+// Wake-on-Startup Types (Phase 5A)
+// ============================================================================
+
+export interface SystemStartupStatus {
+  enabled: boolean;
+  supported: boolean;
+  mode: string;
+  mechanism: string;
+  target_valid: boolean;
+  reason?: string | null;
+}
+
+export interface NotificationCategoryMeta {
+  id: string;
+  label: string;
+  description: string;
+}
+
+export interface NotificationPreferences {
+  enabled: boolean;
+  suppress_when_active: boolean;
+  categories: Record<string, boolean>;
+}
+
+export interface NotificationStatusResponse {
+  supported: boolean;
+  platform: string;
+  mode: string;
+  mechanism: string;
+  app_user_model_id: string;
+  active_profile_id: string;
+  ui_recently_active: boolean;
+  last_error?: string | null;
+  reason?: string | null;
+  preferences: NotificationPreferences;
+  categories_meta: NotificationCategoryMeta[];
+}
+
+export interface NotificationTestResponse {
+  delivered: boolean;
+  suppressed: boolean;
+  reason?: string | null;
+  category: string;
+  title: string;
+  message: string;
+  status: NotificationStatusResponse;
+}
+
+export type AutomationTriggerType = 'manual' | 'scheduled' | 'user_requested';
+
+export interface AutomationStep {
+  step_id?: string;
+  action: string;
+  parameters: Record<string, unknown>;
+  description?: string;
+}
+
+export interface AutomationTriggerConfig {
+  frequency?: 'daily' | 'weekly';
+  time_of_day?: string;
+  weekdays?: number[];
+  timezone?: string;
+  paused?: boolean;
+  last_scheduled_slot?: string | null;
+}
+
+export interface CustomAutomation {
+  automation_id: string;
+  profile_id: string;
+  name: string;
+  description: string;
+  trigger_type: AutomationTriggerType;
+  trigger_config: AutomationTriggerConfig;
+  steps: AutomationStep[];
+  enabled: boolean;
+  last_execution_id?: string | null;
+  last_execution_status?: string | null;
+  last_run_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface AutomationPreviewResponse {
+  name: string;
+  description: string;
+  trigger_type: AutomationTriggerType;
+  trigger_config: AutomationTriggerConfig;
+  steps: AutomationStep[];
+  clarification_needed: boolean;
+  missing_fields: string[];
+  warnings: string[];
+  requires_approval: boolean;
+}
+
+export interface AutomationExecutionStep {
+  step_index: number;
+  step_id: string;
+  action: string;
+  description: string;
+  input_summary?: string;
+  status: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  message?: string | null;
+  output_summary?: string | null;
+  error?: string | null;
+  error_summary?: string | null;
+}
+
+export interface AutomationExecutionStatus {
+  execution_id: string;
+  automation_id: string;
+  automation_name: string;
+  profile_id: string;
+  trigger_source: string;
+  trigger_type?: string;
+  status: string;
+  current_step?: number;
+  total_steps: number;
+  completed_steps?: number;
+  failed_step_index?: number | null;
+  cancelled?: boolean;
+  duration_ms?: number | null;
+  steps: AutomationExecutionStep[];
+  pending_confirmation?: Record<string, unknown> | null;
+  error?: string | null;
+  error_summary?: string | null;
+  started_at?: string;
+  finished_at?: string | null;
+  completed_at?: string | null;
+}
+
+export interface AutomationExecutionHistoryItem {
+  execution_id: string;
+  automation_id: string;
+  profile_id: string;
+  automation_name: string;
+  trigger_type: string;
+  status: string;
+  total_steps: number;
+  completed_steps: number;
+  failed_step_index?: number | null;
+  cancelled: boolean;
+  error_summary?: string | null;
+  duration_ms?: number | null;
+  started_at: string;
+  completed_at?: string | null;
+}
+
+export interface AutomationExecutionHistoryListResponse {
+  items: AutomationExecutionHistoryItem[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+// ============================================================================
+// Three-Mode AI Provider & BYOK Types (Phases 8A–8B)
+// ============================================================================
+
+export type AIProviderId = 'local' | 'byok' | 'voxpilot_cloud';
+
+export interface AIProviderCapabilities {
+  streaming: boolean;
+  structured_output: boolean;
+  tool_calling: boolean;
+  vision: boolean;
+  local_only: boolean;
+}
+
+export interface AIProviderHealth {
+  provider_id: AIProviderId | string;
+  available: boolean;
+  configured: boolean;
+  status: string;
+  reason?: string | null;
+  active_model?: string | null;
+  latency_ms?: number | null;
+}
+
+export interface AIProviderModelInfo {
+  id: string;
+  name: string;
+  context_length?: number | null;
+  supports_tools: boolean;
+  supports_vision: boolean;
+}
+
+export interface AIProviderSummary {
+  provider_id: AIProviderId | string;
+  display_name: string;
+  is_active: boolean;
+  capabilities: AIProviderCapabilities;
+  health: AIProviderHealth;
+  models: AIProviderModelInfo[];
+}
+
+export interface ProfileProviderConfig {
+  profile_id: string;
+  active_provider_id: AIProviderId | string;
+  local_model: string;
+  byok_vendor?: string | null;
+  byok_model?: string | null;
+  has_byok_credential: boolean;
+  cloud_tier?: string | null;
+  updated_at?: string | null;
+}
+
+export interface ProvidersListResponse {
+  providers: AIProviderSummary[];
+  byok_models?: AIProviderModelInfo[];
+}
+
+export interface ActiveProviderResponse {
+  profile_config: ProfileProviderConfig;
+  health: AIProviderHealth;
+  capabilities: AIProviderCapabilities;
+}
+
+export interface OpenAIBYOKConfigureResponse {
+  profile_config: ProfileProviderConfig;
+  health: AIProviderHealth;
+  validated: boolean;
+}
+
+export interface OpenAIBYOKValidateResponse {
+  provider_id: string;
+  vendor: string;
+  valid: boolean;
+  health: AIProviderHealth;
 }

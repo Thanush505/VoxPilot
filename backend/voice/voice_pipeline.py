@@ -128,17 +128,25 @@ class VoicePipeline:
         self.stt.load_model()
         self.tts.load_model()
 
-        print("Checking Ollama connection...")
+        print("Checking active AI provider connection...")
 
         try:
-            import ollama
-            ollama.list()
+            from backend.ai.providers.base import PROVIDER_LOCAL
+            from backend.ai.providers.runtime import resolve_runtime_provider
 
-            print("Ollama connection successful.")
-
+            active_id, active_provider, cfg = resolve_runtime_provider()
+            if active_id == PROVIDER_LOCAL:
+                import ollama
+                ollama.list()
+                print("Ollama connection successful.")
+            else:
+                health = active_provider.health_check(cfg)
+                if not health.available:
+                    raise RuntimeError(health.reason or f"Active provider '{active_id}' is unavailable.")
+                print(f"Active AI provider '{active_id}' ready ({health.active_model}).")
         except Exception as error:
             raise RuntimeError(
-                f"Could not connect to Ollama: {error}"
+                f"Could not connect to active AI provider: {error}"
             ) from error
 
         print("Voice pipeline initialized successfully.")

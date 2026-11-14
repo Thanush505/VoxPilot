@@ -14,6 +14,7 @@ import ollama
 
 from backend.agent.intent import extract_open_command_target
 from backend.agent.tool_registry import ToolRegistry, get_shared_tool_registry
+from backend.ai.model_manager import get_shared_model_manager
 from backend.automation.application_discovery import get_shared_discovery_service
 from backend.automation.application_launcher import PROHIBITED_QUERY_NAMES
 
@@ -67,8 +68,8 @@ ACTION_SCHEMAS_DOC: Dict[str, str] = {
     ),
     "manage_window": (
         "Manage an approved window. "
-        "Parameters: {'action': str, 'application_name': Optional[str], 'hwnd': Optional[int]}. "
-        "Action must be one of: 'activate', 'minimize', 'maximize', 'restore'."
+        "Parameters: {'action': str, 'application_name': Optional[str], 'hwnd': Optional[int], 'layout': Optional[str]}. "
+        "Action must be one of: 'activate', 'minimize', 'maximize', 'restore', 'close', 'get_active', 'minimize_all', 'arrange'."
     ),
     "type_text": (
         "Type text into target application or active window using SendInput. "
@@ -305,6 +306,7 @@ class AgentPlanner:
                 "respond",
                 "ask_clarification",
             ],
+            "email_assistant": ["respond", "ask_clarification"],
             "unknown": ["ask_clarification", "respond"],
         }
 
@@ -312,6 +314,19 @@ class AgentPlanner:
         """Construct deterministic plans for standard natural-language desktop requests."""
         clean = user_input.strip()
         lower = clean.lower()
+
+        if intent == "general_conversation":
+            return {
+                "steps": [
+                    {
+                        "action": "respond",
+                        "description": "Generate conversational response",
+                        "parameters": {},
+                        "requires_confirmation": False,
+                    }
+                ],
+                "response": "",
+            }
 
         # 0a. Application index refresh ("Refresh application index", "Rescan installed applications")
         if re.search(
@@ -437,6 +452,58 @@ class AgentPlanner:
                 "response": "Typing text into the active foreground window.",
             }
 
+        # 4a. Multi-step: Open Notepad, write text, and save in Documents
+        # e.g. "Open Notepad, write a meeting summary, and save it in Documents."
+        notepad_save_match = re.search(
+            r"^(?:open|launch|start)\s+notepad[,;\s]+(?:and\s+)?(?:write|type)\s+[\"']?(.*?)[\"']?[,;\s]+and\s+save\s+(?:it\s+)?(?:in|to)\s+(documents|desktop|downloads)(?:\s+as\s+([a-zA-Z0-9_\-\.]+))?\.?$",
+            clean,
+            re.IGNORECASE,
+        )
+        if notepad_save_match:
+            import os
+            content_desc = notepad_save_match.group(1).strip()
+            folder_key = notepad_save_match.group(2).strip().capitalize()
+            explicit_name = notepad_save_match.group(3)
+            filename = explicit_name.strip() if explicit_name else "meeting_summary.txt"
+            if "." not in filename:
+                filename = f"{filename}.txt"
+            target_path = os.path.join(os.path.expanduser("~"), folder_key, filename)
+            return {
+                "steps": [
+                    {
+                        "action": "launch_application",
+                        "description": "Launch Notepad",
+                        "parameters": {"application_name": "notepad"},
+                        "requires_confirmation": False,
+                    },
+                    {
+                        "action": "type_text",
+                        "description": "Enter supplied text into Notepad",
+                        "parameters": {"text": content_desc, "application_name": "notepad"},
+                        "requires_confirmation": False,
+                    },
+                    {
+                        "action": "send_shortcut",
+                        "description": "Open Save As dialog in Notepad",
+                        "parameters": {"shortcut": "ctrl+s", "application_name": "notepad"},
+                        "requires_confirmation": False,
+                    },
+                    {
+                        "action": "type_text",
+                        "description": f"Enter destination path in {folder_key}: {filename}",
+                        "parameters": {"text": target_path},
+                        "requires_confirmation": False,
+                    },
+                    {
+                        "action": "press_key",
+                        "description": "Confirm Save dialog",
+                        "parameters": {"key": "enter"},
+                        "requires_confirmation": False,
+                    },
+                ],
+                "response": f"Opening Notepad, entering text, and saving to {folder_key} as {filename}.",
+            }
+
         # 4. Composite open and type ("Open Notepad and type Hello")
         composite_match = re.search(
             r"^(?:open|launch|start)\s+(notepad|calculator|chrome|vs\s*code|vscode)\s+and\s+(?:type|write)\s+[\"']?(.*?)[\"']?\.?$",
@@ -475,6 +542,112 @@ class AgentPlanner:
                     },
                 ],
                 "response": f"Opening {app_name.capitalize()} and typing text.",
+            }
+
+        # 5a. Desktop-wide window operations ("Minimize all windows", "Arrange my open windows", "Close active window")
+        if re.search(r"^minimize\s+(?:all|every)\s+windows?\.?$", lower):
+            return {
+                "steps": [
+                    {
+                        "action": "manage_window",
+                        "description": "Minimize all open approved windows",
+                        "parameters": {"action": "minimize_all"},
+                        "requires_confirmation": False,
+                    }
+                ],
+                "response": "Minimizing all open windows.",
+            }
+
+        arrange_match = re.search(
+            r"^(?:arrange|tile|cascade)\s+(?:my\s+)?(?:open\s+)?windows?\.?$",
+            lower,
+        )
+        if arrange_match:
+            layout = "cascade" if "cascade" in lower else "tile"
+            return {
+                "steps": [
+                    {
+                        "action": "manage_window",
+                        "description": f"Arrange open windows ({layout})",
+                        "parameters": {"action": "arrange", "layout": layout},
+                        "requires_confirmation": False,
+                    }
+                ],
+                "response": f"Arranging open windows in {layout} layout.",
+            }
+
+        if re.search(
+            r"^close\s+(?:the\s+)?(?:currently\s+)?(?:active|current|this)\s+window\.?$",
+            lower,
+        ):
+            return {
+                "steps": [
+                    {
+                        "action": "manage_window",
+                        "description": "Close the currently active window (requires confirmation)",
+                        "parameters": {"action": "close"},
+                        "requires_confirmation": True,
+                    }
+                ],
+                "response": "Requesting confirmation to close the currently active window.",
+            }
+
+        if re.search(
+            r"^(?:what|which|identify|show|get)\s+(?:is\s+)?(?:the\s+)?(?:currently\s+)?active\s+window\??$",
+            lower,
+        ):
+            return {
+                "steps": [
+                    {
+                        "action": "manage_window",
+                        "description": "Identify the currently active window",
+                        "parameters": {"action": "get_active"},
+                        "requires_confirmation": False,
+                    }
+                ],
+                "response": "Checking the currently active window.",
+            }
+
+        if re.search(
+            r"^(?:list|show)\s+(?:all\s+)?(?:running|open)\s+(?:applications|apps|windows)\.?$",
+            lower,
+        ):
+            return {
+                "steps": [
+                    {
+                        "action": "find_windows",
+                        "description": "List running applications and open windows",
+                        "parameters": {},
+                        "requires_confirmation": False,
+                    }
+                ],
+                "response": "Listing currently open windows.",
+            }
+
+        # 5b. Switch to / focus / minimize / maximize / restore a named window
+        switch_match = re.search(
+            r"^(?:switch\s+to|focus|bring\s+to\s+(?:the\s+)?front)\s+(.+?)\.?$",
+            clean,
+            re.IGNORECASE,
+        )
+        if switch_match:
+            target_app = switch_match.group(1).strip().strip("'\"")
+            return {
+                "steps": [
+                    {
+                        "action": "find_windows",
+                        "description": f"Find {target_app} window",
+                        "parameters": {"application_name": target_app},
+                        "requires_confirmation": False,
+                    },
+                    {
+                        "action": "manage_window",
+                        "description": f"Activate {target_app} window",
+                        "parameters": {"action": "activate", "application_name": target_app},
+                        "requires_confirmation": False,
+                    },
+                ],
+                "response": f"Switching to {target_app}.",
             }
 
         # 5. Window management ("Minimize Notepad", "Maximize Calculator")
@@ -524,7 +697,31 @@ class AgentPlanner:
                 "response": f"Please confirm if you wish to close {app_name.capitalize()}.",
             }
 
-        # 7. Create text file ("Create a text file named notes.txt")
+        # 7. Create text file ("Create a text file named notes.txt",
+        #    "Create a text file containing these notes: ...",
+        #    "Create a text file named todo.txt containing Buy milk")
+        create_with_content_match = re.search(
+            r"^(?:create|make)\s+(?:a\s+)?(?:new\s+)?(?:text\s+)?file\s+(?:(?:named|called)\s+([a-zA-Z0-9_\-\.]+\.[a-zA-Z0-9]+)\s+)?(?:containing|with)\s+(?:these\s+notes\s*:?\s*|content\s*:?\s*)?(.+)$",
+            clean,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if create_with_content_match:
+            import os
+            filename = create_with_content_match.group(1) or "notes.txt"
+            note_content = create_with_content_match.group(2).strip().strip("'\"")
+            target_path = filename if os.path.isabs(filename) else os.path.join(os.path.expanduser("~"), "Documents", filename)
+            return {
+                "steps": [
+                    {
+                        "action": "create_file",
+                        "description": f"Create text file '{filename}' with provided content",
+                        "parameters": {"file_path": target_path, "content": note_content},
+                        "requires_confirmation": False,
+                    }
+                ],
+                "response": f"Creating '{target_path}' with your notes.",
+            }
+
         create_file_match = re.search(
             r"^(?:create|make)\s+(?:a\s+)?(?:new\s+)?(?:text\s+)?file\s+(?:named\s+|called\s+)?([a-zA-Z0-9_\-\.]+\.[a-zA-Z0-9]+)\.?$",
             lower,
@@ -555,6 +752,47 @@ class AgentPlanner:
                     }
                 ],
                 "response": "Sending Ctrl+S shortcut to save the document.",
+            }
+
+        # 9a. Open special user folders ("Open my Downloads folder", "Open Documents folder")
+        open_folder_match = re.search(
+            r"^open\s+(?:my\s+)?(?:the\s+)?(downloads|documents|desktop)(?:\s+folder)?\.?$",
+            lower,
+        )
+        if open_folder_match:
+            folder_name = open_folder_match.group(1).strip()
+            return {
+                "steps": [
+                    {
+                        "action": "launch_application",
+                        "description": f"Open {folder_name.capitalize()} folder",
+                        "parameters": {"application_name": folder_name},
+                        "requires_confirmation": False,
+                    }
+                ],
+                "response": f"Opening your {folder_name.capitalize()} folder.",
+            }
+
+        # 9b. Search for folder ("Find a folder named VoxPilot")
+        folder_search_match = re.search(
+            r"^(?:search|find|look|locate)\s+(?:for\s+)?(?:a\s+)?(?:folder|directory)\s+(?:named\s+|called\s+)?([a-zA-Z0-9_\-\.\s]{1,80}?)\.?$",
+            clean,
+            re.IGNORECASE,
+        )
+        if folder_search_match:
+            import os
+            folder_query = folder_search_match.group(1).strip().strip("'\"")
+            home_dir = os.path.expanduser("~")
+            return {
+                "steps": [
+                    {
+                        "action": "search_files",
+                        "description": f"Search for folder named '{folder_query}'",
+                        "parameters": {"query": folder_query, "directory_path": home_dir},
+                        "requires_confirmation": False,
+                    }
+                ],
+                "response": f"Searching for folder '{folder_query}'.",
             }
 
         # 9. Search for file ("Search for notes.txt", "Search for a document")
@@ -770,17 +1008,29 @@ Rules:
 """
 
         try:
-            result = ollama.chat(
-                model=self.model,
-                messages=[
+            from backend.ai.providers.runtime import run_provider_chat
+
+            def _local_plan_call(local_model: str, msgs, temp: float) -> str:
+                model_manager = get_shared_model_manager()
+                target_model = self.model or local_model
+                with model_manager.track_inference(target_model):
+                    result = ollama.chat(
+                        model=target_model,
+                        messages=msgs,
+                        format="json",
+                        options={"temperature": temp},
+                    )
+                return result.message.content
+
+            response_text = run_provider_chat(
+                [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_input.strip()},
                 ],
-                format="json",
-                options={"temperature": 0},
+                temperature=0,
+                json_mode=True,
+                local_executor=_local_plan_call,
             )
-
-            response_text = result.message.content
             if not response_text:
                 raise PlannerError("The model returned an empty plan.")
 

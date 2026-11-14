@@ -15,6 +15,8 @@ import {
 import apiClient from '../api/client';
 import { EmergencyStopStatus, ToolInfo } from '../api/types';
 import EmergencyStopPanel from '../components/safety/EmergencyStopPanel';
+import CustomAutomationBuilder from '../components/automation/CustomAutomationBuilder';
+import AutomationHistoryPanel from '../components/automation/AutomationHistoryPanel';
 import LoadingState from '../components/common/LoadingState';
 import ErrorState from '../components/common/ErrorState';
 
@@ -152,6 +154,10 @@ export const AutomationPage: React.FC<AutomationPageProps> = ({
         />
       ) : (
         <>
+          <CustomAutomationBuilder isBackendConnected={isBackendConnected} />
+
+          <AutomationHistoryPanel isBackendConnected={isBackendConnected} />
+
           {/* Active Operations Section */}
           <div className="automation-section">
             <div className="section-title-row">

@@ -50,6 +50,7 @@ PHASE_LISTENING = "listening"
 PHASE_TRANSCRIBING = "transcribing"
 PHASE_PROCESSING = "processing"
 PHASE_SPEAKING = "speaking"
+PHASE_INTERRUPTED = "interrupted"
 PHASE_ERROR = "error"
 
 
@@ -127,6 +128,10 @@ class VoiceSettingsManager:
         "tts_enabled": True,
         "piper_voice": "en_US-lessac-medium.onnx",
         "streaming_vad_enabled": True,
+        "wake_word_enabled": False,
+        "wake_word_model": "hey_jarvis_v0.1",
+        "wake_word_cooldown_seconds": 2.0,
+        "tts_echo_cooldown_seconds": 1.5,
     }
 
     def __init__(self, config_path: Optional[Path] = None) -> None:
@@ -184,6 +189,20 @@ class VoiceSettingsManager:
                             merged["piper_voice"] = Path(raw["piper_voice"].strip()).name
                         if "streaming_vad_enabled" in raw:
                             merged["streaming_vad_enabled"] = bool(raw["streaming_vad_enabled"])
+                        if "wake_word_enabled" in raw:
+                            merged["wake_word_enabled"] = bool(raw["wake_word_enabled"])
+                        if "wake_word_model" in raw and isinstance(raw["wake_word_model"], str) and raw["wake_word_model"].strip():
+                            merged["wake_word_model"] = raw["wake_word_model"].strip()
+                        if "wake_word_cooldown_seconds" in raw:
+                            try:
+                                merged["wake_word_cooldown_seconds"] = max(0.5, min(30.0, float(raw["wake_word_cooldown_seconds"])))
+                            except (TypeError, ValueError):
+                                pass
+                        if "tts_echo_cooldown_seconds" in raw:
+                            try:
+                                merged["tts_echo_cooldown_seconds"] = max(0.0, min(10.0, float(raw["tts_echo_cooldown_seconds"])))
+                            except (TypeError, ValueError):
+                                pass
                 except Exception as exc:
                     logger.warning(f"Failed to read voice settings from {path}: {exc}. Using defaults.")
 
@@ -221,6 +240,16 @@ class VoiceSettingsManager:
                         next_settings["piper_voice"] = voice_str
                 if "streaming_vad_enabled" in updates and updates["streaming_vad_enabled"] is not None:
                     next_settings["streaming_vad_enabled"] = bool(updates["streaming_vad_enabled"])
+                if "wake_word_enabled" in updates and updates["wake_word_enabled"] is not None:
+                    next_settings["wake_word_enabled"] = bool(updates["wake_word_enabled"])
+                if "wake_word_model" in updates and updates["wake_word_model"] is not None:
+                    model_str = str(updates["wake_word_model"]).strip()
+                    if model_str:
+                        next_settings["wake_word_model"] = model_str
+                if "wake_word_cooldown_seconds" in updates and updates["wake_word_cooldown_seconds"] is not None:
+                    next_settings["wake_word_cooldown_seconds"] = max(0.5, min(30.0, float(updates["wake_word_cooldown_seconds"])))
+                if "tts_echo_cooldown_seconds" in updates and updates["tts_echo_cooldown_seconds"] is not None:
+                    next_settings["tts_echo_cooldown_seconds"] = max(0.0, min(10.0, float(updates["tts_echo_cooldown_seconds"])))
 
             path = self.config_path
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -282,6 +311,18 @@ class VoiceService:
         self._last_turn_text: str = ""
         self._last_turn_time: float = 0.0
 
+        # Push-to-talk, wake-word, and interruption runtime state (Phase 5B)
+        self._ptt_active: bool = False
+        self._ptt_stop_event = threading.Event()
+        self._ptt_thread: Optional[threading.Thread] = None
+        self._ptt_frames: List[np.ndarray] = []
+        self._ptt_conversation_id: Optional[str] = None
+        self._interrupted_flag: bool = False
+        self._last_tts_finished_at: float = 0.0
+        self._last_wake_trigger_at: float = 0.0
+        self._wake_stop_event = threading.Event()
+        self._wake_thread: Optional[threading.Thread] = None
+
         # Event buffer for dashboard synchronization
         self._next_event_id: int = 1
         self._events: List[Dict[str, Any]] = []
@@ -318,7 +359,20 @@ class VoiceService:
             self._events.append(event)
             if len(self._events) > self.MAX_EVENTS_HISTORY:
                 self._events = self._events[-self.MAX_EVENTS_HISTORY:]
-            return event
+        if event_type == "voice_error":
+            try:
+                from backend.automation.notifications import get_shared_notification_service
+
+                err_text = str(payload.get("error") or "Voice subsystem encountered an error.")
+                get_shared_notification_service().notify(
+                    category="voice_error",
+                    title="VoxPilot Voice Error",
+                    message=err_text,
+                    event_key=f"voice_error:{err_text[:48]}",
+                )
+            except Exception as notify_err:
+                logger.debug("Non-fatal voice_error notification failure: %s", notify_err)
+        return event
 
     def start_hotkey_listener(self) -> bool:
         """Start the global Windows hotkey listener if enabled in settings."""
@@ -332,15 +386,307 @@ class VoiceService:
         self.hotkey_listener.stop()
 
     def shutdown(self) -> None:
-        """Cleanly stop active voice mode, release microphone, and unregister global shortcut."""
+        """Cleanly stop active voice mode, PTT, wake-word, release microphone, and unregister shortcut."""
+        self.stop_wake_word_listener()
+        self.interrupt_voice(reason="Application shutdown")
         self.stop_voice_mode(reason="Application shutdown")
         self.stop_hotkey_listener()
 
     def _on_emergency_stop_triggered(self) -> None:
         """Immediate callback when Global Emergency Stop is triggered."""
+        logger.warning("Emergency Stop triggered. Aborting active voice operations immediately.")
+        self.interrupt_voice(reason="Halted by Emergency Stop")
         if self.is_active:
-            logger.warning("Emergency Stop triggered. Aborting Voice Mode immediately.")
             self.stop_voice_mode(reason="Halted by Emergency Stop")
+
+    def interrupt_voice(self, reason: str = "Interrupted by user") -> Dict[str, Any]:
+        """Immediately stop active speech playback and recording without leaving audio locked."""
+        with self._lock:
+            self._interrupted_flag = True
+            self._ptt_stop_event.set()
+            self.pipeline.stop_listening()
+            self.pipeline.stop_speaking()
+            self.pipeline.recorder.is_recording = False
+            was_busy = self._phase in (PHASE_LISTENING, PHASE_TRANSCRIBING, PHASE_PROCESSING, PHASE_SPEAKING) or self._ptt_active
+            if was_busy:
+                self._phase = PHASE_INTERRUPTED
+                self._emit_event("voice_interrupted", reason=reason)
+                self._emit_event("phase_changed", phase=PHASE_INTERRUPTED, reason=reason)
+
+        ptt_thread = self._ptt_thread
+        if ptt_thread is not None and ptt_thread.is_alive() and ptt_thread is not threading.current_thread():
+            ptt_thread.join(timeout=1.5)
+
+        with self._lock:
+            self._ptt_active = False
+            self._ptt_thread = None
+            self._ptt_frames.clear()
+            self._last_tts_finished_at = time.monotonic()
+            if not self._is_active:
+                self._phase = PHASE_IDLE
+                self._emit_event("phase_changed", phase=PHASE_IDLE)
+
+        return self.get_status()
+
+    def start_push_to_talk(self, conversation_id: Optional[str] = None) -> Dict[str, Any]:
+        """Start push-to-talk microphone capture if not already recording."""
+        if get_shared_emergency_stop_manager().is_emergency_stop_active():
+            return {
+                "success": False,
+                "status": "cancelled",
+                "message": "Cannot start push-to-talk while Emergency Stop is active.",
+                "voice_status": self.get_status(),
+            }
+
+        with self._lock:
+            if self._ptt_active or self._phase == PHASE_LISTENING:
+                return {
+                    "success": False,
+                    "status": "already_recording",
+                    "message": "Microphone recording is already active.",
+                    "voice_status": self.get_status(),
+                }
+            self.stop_wake_word_listener()
+            self._interrupted_flag = False
+            self._ptt_active = True
+            self._ptt_frames = []
+            self._ptt_stop_event.clear()
+            if conversation_id:
+                self._ptt_conversation_id = conversation_id
+            elif self._active_conversation_id:
+                self._ptt_conversation_id = self._active_conversation_id
+            self._last_error = None
+            self._phase = PHASE_LISTENING
+            self._emit_event("phase_changed", phase=PHASE_LISTENING, source="push_to_talk")
+
+        def _ptt_capture_worker() -> None:
+            stream = None
+            try:
+                cfg = self.settings_manager.get_settings()
+                dev = AudioRecorder.resolve_device(cfg.get("microphone_device")) if cfg.get("microphone_device") is not None else None
+                stream = sd.InputStream(samplerate=16000, channels=1, dtype="float32", device=dev)
+                stream.start()
+                self.pipeline.recorder.is_recording = True
+                while not self._ptt_stop_event.is_set():
+                    data, _ = stream.read(1024)
+                    if data is not None and len(data) > 0:
+                        self._ptt_frames.append(data.copy().reshape(-1))
+            except Exception as err:
+                logger.warning("Push-to-talk microphone error: %s", err)
+                with self._lock:
+                    self._ptt_active = False
+                    self._phase = PHASE_ERROR
+                    self._last_error = f"Microphone error: {err}"
+                    self._emit_event("voice_error", error=self._last_error)
+            finally:
+                self.pipeline.recorder.is_recording = False
+                if stream is not None:
+                    try:
+                        stream.stop()
+                        stream.close()
+                    except Exception:
+                        pass
+
+        worker = threading.Thread(target=_ptt_capture_worker, name="VoxPilot-PTT-Capture", daemon=True)
+        with self._lock:
+            self._ptt_thread = worker
+        worker.start()
+
+        return {
+            "success": True,
+            "status": "listening",
+            "voice_status": self.get_status(),
+        }
+
+    def stop_push_to_talk(self) -> Dict[str, Any]:
+        """Stop push-to-talk recording, transcribe locally, execute agent, and speak response."""
+        with self._lock:
+            if not self._ptt_active and self._ptt_thread is None:
+                return {
+                    "success": False,
+                    "status": "not_recording",
+                    "message": "Push-to-talk is not currently recording.",
+                    "voice_status": self.get_status(),
+                }
+            self._ptt_stop_event.set()
+            worker = self._ptt_thread
+
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=2.0)
+
+        with self._lock:
+            self._ptt_active = False
+            self._ptt_thread = None
+            frames = list(self._ptt_frames)
+            self._ptt_frames.clear()
+            conv_id = self._ptt_conversation_id or self._active_conversation_id
+
+        if self._interrupted_flag or self._phase == PHASE_ERROR:
+            with self._lock:
+                if self._phase == PHASE_INTERRUPTED:
+                    self._phase = PHASE_IDLE
+            return {"success": False, "status": "interrupted", "voice_status": self.get_status()}
+
+        if not frames:
+            with self._lock:
+                self._phase = PHASE_IDLE
+                self._emit_event("phase_changed", phase=PHASE_IDLE)
+            return {
+                "success": True,
+                "status": "empty_audio",
+                "message": "No audio was captured.",
+                "voice_status": self.get_status(),
+            }
+
+        audio = np.concatenate(frames).astype(np.float32)
+        rms = float(np.sqrt(np.mean(np.square(audio)))) if len(audio) > 0 else 0.0
+        if len(audio) < 1600 or rms < 0.002:
+            del audio
+            with self._lock:
+                self._phase = PHASE_IDLE
+                self._emit_event("phase_changed", phase=PHASE_IDLE)
+            return {
+                "success": True,
+                "status": "empty_audio",
+                "message": "Recording was silent or too short.",
+                "voice_status": self.get_status(),
+            }
+
+        with self._lock:
+            self._phase = PHASE_TRANSCRIBING
+            self._emit_event("phase_changed", phase=PHASE_TRANSCRIBING)
+
+        try:
+            if self.pipeline.stt.model is None:
+                self.pipeline.stt.load_model()
+            transcript = (self.pipeline.recognize(audio) or "").strip()
+        except SpeechToTextError as stt_err:
+            with self._lock:
+                self._phase = PHASE_ERROR
+                self._last_error = f"Speech recognition error: {stt_err}"
+                self._emit_event("voice_error", error=self._last_error)
+            return {"success": False, "status": "stt_error", "message": self._last_error, "voice_status": self.get_status()}
+        finally:
+            del audio
+
+        if not transcript:
+            with self._lock:
+                self._phase = PHASE_IDLE
+                self._emit_event("phase_changed", phase=PHASE_IDLE)
+            return {"success": True, "status": "empty_transcript", "message": "No speech recognized.", "voice_status": self.get_status()}
+
+        with self._lock:
+            self._last_transcript = transcript
+            self._phase = PHASE_PROCESSING
+            self._emit_event("transcription", text=transcript)
+            self._emit_event("phase_changed", phase=PHASE_PROCESSING, text=transcript)
+
+        try:
+            reply = self.pipeline.generate_response(transcript, conversation_id=conv_id)
+            agent_result = self.pipeline.last_agent_result or {}
+        except Exception as err:
+            reply = "Sorry, I encountered an error while processing your voice request."
+            agent_result = {"execution_status": "failed", "response": reply, "error": str(err)}
+
+        with self._lock:
+            self._last_response = reply
+            self._last_agent_result = agent_result
+            if agent_result.get("conversation_id"):
+                self._active_conversation_id = agent_result["conversation_id"]
+        self._emit_event("agent_response", user_input=transcript, response=reply, execution=agent_result)
+
+        cfg = self.settings_manager.get_settings()
+        if cfg.get("tts_enabled", True) and reply and not self._interrupted_flag and not get_shared_emergency_stop_manager().is_emergency_stop_active():
+            with self._lock:
+                self._phase = PHASE_SPEAKING
+                self._emit_event("phase_changed", phase=PHASE_SPEAKING, response=reply)
+            self._speak_safe(reply)
+
+        with self._lock:
+            if self._phase != PHASE_ERROR:
+                self._phase = PHASE_IDLE
+                self._emit_event("phase_changed", phase=PHASE_IDLE)
+
+        return {
+            "success": True,
+            "status": "completed",
+            "transcript": transcript,
+            "response": reply,
+            "voice_status": self.get_status(),
+        }
+
+    def _should_suppress_wake_trigger(self) -> bool:
+        """Prevent duplicate wake-word triggers, concurrent streams, and TTS echo self-activation."""
+        if get_shared_emergency_stop_manager().is_emergency_stop_active():
+            return True
+        if self._is_active or self._ptt_active:
+            return True
+        if self._phase in (PHASE_LISTENING, PHASE_TRANSCRIBING, PHASE_PROCESSING, PHASE_SPEAKING):
+            return True
+        cfg = self.settings_manager.get_settings()
+        now = time.monotonic()
+        echo_cooldown = float(cfg.get("tts_echo_cooldown_seconds", 1.5))
+        wake_cooldown = float(cfg.get("wake_word_cooldown_seconds", 2.0))
+        if (now - self._last_tts_finished_at) < echo_cooldown:
+            return True
+        if (now - self._last_wake_trigger_at) < wake_cooldown:
+            return True
+        return False
+
+    def _handle_wake_word_detection(self, event: Optional[Dict[str, Any]]) -> bool:
+        """Handle a wake-word detection event safely with cooldown and echo suppression."""
+        if not event or self._should_suppress_wake_trigger():
+            return False
+        with self._lock:
+            self._last_wake_trigger_at = time.monotonic()
+        self.stop_wake_word_listener()
+        self._emit_event("wake_word_detected", model=event.get("model"), score=event.get("score"))
+        self.start_voice_mode(source="wake_word")
+        return True
+
+    def start_wake_word_listener(self) -> bool:
+        """Start optional background wake-word listener if enabled in settings."""
+        cfg = self.settings_manager.get_settings()
+        if not cfg.get("wake_word_enabled", False):
+            return False
+        if self._wake_thread is not None and self._wake_thread.is_alive():
+            return True
+        self._wake_stop_event.clear()
+
+        def _wake_worker() -> None:
+            try:
+                from backend.voice.wake_word import WakeWordDetector, WakeWordError
+                detector = WakeWordDetector(
+                    enabled=True,
+                    model_path=cfg.get("wake_word_model", "hey_jarvis_v0.1"),
+                    cooldown_seconds=float(cfg.get("wake_word_cooldown_seconds", 2.0)),
+                    device=cfg.get("microphone_device"),
+                )
+                detector.load_model()
+                while not self._wake_stop_event.is_set():
+                    if self._should_suppress_wake_trigger():
+                        time.sleep(0.2)
+                        continue
+                    detection = detector.listen_for_wake_word(timeout=1.0)
+                    if detection and not self._wake_stop_event.is_set():
+                        self._handle_wake_word_detection(detection)
+                        break
+            except Exception as err:
+                logger.warning("Wake-word listener stopped: %s", err)
+                with self._lock:
+                    self._last_error = f"Wake-word warning: {err}"
+
+        self._wake_thread = threading.Thread(target=_wake_worker, name="VoxPilot-WakeWord", daemon=True)
+        self._wake_thread.start()
+        return True
+
+    def stop_wake_word_listener(self) -> None:
+        """Stop the background wake-word listener and release its microphone stream."""
+        self._wake_stop_event.set()
+        t = self._wake_thread
+        if t is not None and t.is_alive() and t is not threading.current_thread():
+            t.join(timeout=1.5)
+        self._wake_thread = None
 
     def _on_global_hotkey_pressed(self, shortcut_name: str) -> None:
         """Toggle Voice Mode on/off when the global Windows shortcut is pressed."""
@@ -666,7 +1012,7 @@ class VoiceService:
 
     def _speak_safe(self, text: str) -> None:
         """Synthesize and play speech through Piper TTS, handling cancellation or model errors gracefully."""
-        if not text or not text.strip() or self._stop_event.is_set():
+        if not text or not text.strip() or self._stop_event.is_set() or self._interrupted_flag:
             return
         try:
             cfg = self.settings_manager.get_settings()
@@ -682,6 +1028,9 @@ class VoiceService:
                 self._last_error = f"TTS warning: {tts_err}"
         except Exception as err:
             logger.warning(f"Audio playback warning: {err}")
+        finally:
+            with self._lock:
+                self._last_tts_finished_at = time.monotonic()
 
     def update_config(self, updates: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -718,6 +1067,12 @@ class VoiceService:
             piper_path = resolve_piper_voice_path(saved.get("piper_voice"))
             if self.pipeline.tts.model_path != piper_path:
                 self.pipeline.tts = TextToSpeech(model_path=str(piper_path))
+
+            if "wake_word_enabled" in updates:
+                if saved.get("wake_word_enabled", False):
+                    self.start_wake_word_listener()
+                else:
+                    self.stop_wake_word_listener()
 
             return self.get_status()
 
@@ -847,7 +1202,9 @@ class VoiceService:
             return {
                 "is_active": self._is_active,
                 "phase": self._phase,
-                "is_recording": bool(getattr(self.pipeline.recorder, "is_recording", False)),
+                "is_recording": bool(getattr(self.pipeline.recorder, "is_recording", False)) or self._ptt_active,
+                "is_ptt_active": self._ptt_active,
+                "wake_word_enabled": cfg.get("wake_word_enabled", False),
                 "conversation_id": self._active_conversation_id,
                 "last_transcript": self._last_transcript,
                 "last_response": self._last_response,

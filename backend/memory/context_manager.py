@@ -14,6 +14,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Callable
 
+from backend.database.models import sanitize_dict_for_storage, scrub_text_secrets
+
 logger = logging.getLogger(__name__)
 
 
@@ -148,6 +150,98 @@ class ConversationContext:
             parts.append(f"Recent URL: {self.recent_urls[0]}")
         return "; ".join(parts) if parts else "No previous context."
 
+    def get_recent_turns_text(self, max_turns: int = 5) -> str:
+        """Format recent conversation turns cleanly for conversational LLM prompting."""
+        if not self.turns:
+            return ""
+        lines: List[str] = []
+        for t in self.turns[-max(1, max_turns):]:
+            user_txt = scrub_text_secrets(t.user_input or "")
+            resp_txt = scrub_text_secrets(t.response or "")
+            if user_txt:
+                lines.append(f"User: {user_txt}")
+            if resp_txt:
+                lines.append(f"Assistant: {resp_txt}")
+        return "\n".join(lines)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize short-term conversation context to a secret-scrubbed JSON-ready dictionary."""
+        serialized_turns = []
+        for t in self.turns:
+            serialized_turns.append({
+                "turn_id": t.turn_id,
+                "user_input": scrub_text_secrets(t.user_input or ""),
+                "intent": t.intent,
+                "plan_summary": [scrub_text_secrets(str(p)) for p in (t.plan_summary or [])],
+                "completed_actions": list(t.completed_actions or []),
+                "response": scrub_text_secrets(t.response or ""),
+                "status": t.status,
+                "timestamp": float(t.timestamp),
+            })
+
+        payload = {
+            "conversation_id": self.conversation_id,
+            "active_window": dict(self.active_window) if isinstance(self.active_window, dict) else None,
+            "recent_files": list(self.recent_files),
+            "recent_urls": list(self.recent_urls),
+            "recent_application": self.recent_application,
+            "turns": serialized_turns,
+            "created_at": float(self.created_at),
+            "updated_at": float(self.updated_at),
+        }
+        return sanitize_dict_for_storage(payload, max_string_len=1000)
+
+    def load_from_dict(self, data: Dict[str, Any], max_turns: int = 5) -> None:
+        """Restore short-term context state from a parsed dictionary cleanly and safely."""
+        if not isinstance(data, dict):
+            return
+
+        if isinstance(data.get("active_window"), dict):
+            aw = data["active_window"]
+            clean_aw = {
+                "hwnd": int(aw["hwnd"]) if aw.get("hwnd") is not None else 0,
+                "app_name": aw.get("app_name"),
+                "title": scrub_text_secrets(str(aw.get("title", ""))),
+            }
+            self.active_window = clean_aw
+        else:
+            self.active_window = None
+
+        raw_files = data.get("recent_files")
+        if isinstance(raw_files, list):
+            self.recent_files = [str(f) for f in raw_files if isinstance(f, str) and f.strip()][:10]
+
+        raw_urls = data.get("recent_urls")
+        if isinstance(raw_urls, list):
+            self.recent_urls = [str(u) for u in raw_urls if isinstance(u, str) and u.strip()][:5]
+
+        rec_app = data.get("recent_application")
+        self.recent_application = str(rec_app).strip() if isinstance(rec_app, str) and rec_app.strip() else None
+
+        restored_turns: List[ConversationTurn] = []
+        raw_turns = data.get("turns")
+        if isinstance(raw_turns, list):
+            for idx, item in enumerate(raw_turns[-max_turns:]):
+                if not isinstance(item, dict):
+                    continue
+                restored_turns.append(
+                    ConversationTurn(
+                        turn_id=str(item.get("turn_id") or f"turn_{idx + 1}"),
+                        user_input=scrub_text_secrets(str(item.get("user_input") or "")),
+                        intent=str(item.get("intent") or "general_conversation"),
+                        plan_summary=[str(x) for x in (item.get("plan_summary") or []) if isinstance(x, str)],
+                        completed_actions=[str(x) for x in (item.get("completed_actions") or []) if isinstance(x, str)],
+                        response=scrub_text_secrets(str(item.get("response") or "")),
+                        status=str(item.get("status") or "completed"),
+                        timestamp=float(item.get("timestamp") or time.time()),
+                    )
+                )
+        self.turns = restored_turns
+        if isinstance(data.get("created_at"), (int, float)):
+            self.created_at = float(data["created_at"])
+        if isinstance(data.get("updated_at"), (int, float)):
+            self.updated_at = float(data["updated_at"])
+
 
 # ==============================================================================
 # Helper Functions for Target Revalidation
@@ -226,6 +320,26 @@ class ConversationContextManager:
         valid_files = [f for f in ctx.recent_files if self.is_file_accessible(f)]
         ctx.recent_files = valid_files
         return valid_files
+
+    @property
+    def max_history_turns(self) -> int:
+        return self._max_history_turns
+
+    def has_context(self, conversation_id: str) -> bool:
+        """Check whether an active context already exists in memory for conversation_id."""
+        if not conversation_id or not isinstance(conversation_id, str):
+            return False
+        with self._lock:
+            return conversation_id.strip() in self._contexts
+
+    def set_context(self, conversation_id: str, ctx: ConversationContext) -> ConversationContext:
+        """Store or replace the isolated context for conversation_id."""
+        if not conversation_id or not isinstance(conversation_id, str):
+            raise ValueError("A valid non-empty conversation_id string is required.")
+        clean_id = conversation_id.strip()
+        with self._lock:
+            self._contexts[clean_id] = ctx
+            return ctx
 
     def get_context(self, conversation_id: str) -> ConversationContext:
         """Retrieve existing context or create a new empty context strictly for conversation_id."""

@@ -29,6 +29,49 @@ import {
   UpdateChannel,
   ApplicationsListResponse,
   DirectLaunchResponse,
+  SystemHardwareResponse,
+  SystemModelsResponse,
+  RunningModelsResponse,
+  ModelOperationResponse,
+  MemoryItem,
+  MemoryListResponse,
+  MemorySearchResponse,
+  MemoryCreateRequest,
+  MemoryUpdateRequest,
+  MemoryDeleteResponse,
+  PreferenceItem,
+  PreferenceListResponse,
+  PreferenceCreateRequest,
+  PreferenceUpdateRequest,
+  PreferenceDeleteResponse,
+  ProfileItem,
+  ProfileListResponse,
+  ProfileCreateRequest,
+  ProfileUpdateRequest,
+  ProfileDeleteResponse,
+  VisionAvailabilityStatus,
+  ScreenCaptureResponse,
+  EmailAccountStatusResponse,
+  EmailDraftItem,
+  EmailDraftSendConfirmationResponse,
+  SystemStartupStatus,
+  NotificationPreferences,
+  NotificationStatusResponse,
+  NotificationTestResponse,
+  AutomationTriggerType,
+  AutomationStep,
+  AutomationTriggerConfig,
+  CustomAutomation,
+  AutomationPreviewResponse,
+  AutomationExecutionStatus,
+  AutomationExecutionHistoryListResponse,
+  AIProviderId,
+  AIProviderHealth,
+  ProfileProviderConfig,
+  ProvidersListResponse,
+  ActiveProviderResponse,
+  OpenAIBYOKConfigureResponse,
+  OpenAIBYOKValidateResponse,
 } from './types';
 
 class ApiClient {
@@ -182,7 +225,8 @@ class ApiClient {
   public async execute(
     userInput: string,
     conversationId?: string,
-    executionId?: string
+    executionId?: string,
+    captureId?: string
   ): Promise<ApiResponse<ExecutionStatusResponse>> {
     return this.request<ExecutionStatusResponse>(
       '/agent/execute',
@@ -192,6 +236,7 @@ class ApiClient {
           user_input: userInput,
           conversation_id: conversationId || undefined,
           execution_id: executionId || undefined,
+          capture_id: captureId || undefined,
         }),
       },
       125000
@@ -458,6 +503,48 @@ class ApiClient {
   }
 
   /**
+   * Interrupt active speech playback or voice capture: POST /agent/voice/interrupt
+   */
+  public async interruptVoice(reason?: string): Promise<ApiResponse<VoiceStatusResponse>> {
+    return this.request<VoiceStatusResponse>(
+      '/agent/voice/interrupt',
+      {
+        method: 'POST',
+        body: JSON.stringify({ reason: reason || 'Interrupted by user' }),
+      },
+      10000
+    );
+  }
+
+  /**
+   * Start push-to-talk capture: POST /agent/voice/ptt/start
+   */
+  public async startPushToTalk(conversationId?: string): Promise<ApiResponse<VoiceStatusResponse>> {
+    return this.request<VoiceStatusResponse>(
+      '/agent/voice/ptt/start',
+      {
+        method: 'POST',
+        body: JSON.stringify({ conversation_id: conversationId || undefined }),
+      },
+      10000
+    );
+  }
+
+  /**
+   * Stop push-to-talk capture and process speech: POST /agent/voice/ptt/stop
+   */
+  public async stopPushToTalk(): Promise<ApiResponse<VoiceStatusResponse>> {
+    return this.request<VoiceStatusResponse>(
+      '/agent/voice/ptt/stop',
+      {
+        method: 'POST',
+        body: JSON.stringify({}),
+      },
+      15000
+    );
+  }
+
+  /**
    * Retrieve persistent voice settings & shortcut status: GET /agent/voice/config
    */
   public async getVoiceConfig(): Promise<
@@ -718,6 +805,784 @@ class ApiClient {
         }),
       },
       15000
+    );
+  }
+
+  // ===========================================================================
+  // Hardware Telemetry & Local AI Model Lifecycle API (Phase 1A)
+  // ===========================================================================
+
+  /**
+   * Fetch read-only host CPU, RAM, GPU, and Ollama telemetry: GET /api/system/hardware
+   */
+  public async getSystemHardware(): Promise<ApiResponse<SystemHardwareResponse>> {
+    return this.request<SystemHardwareResponse>('/api/system/hardware', {}, 10000);
+  }
+
+  /**
+   * Fetch installed and running Ollama models: GET /api/system/models
+   */
+  public async getSystemModels(): Promise<ApiResponse<SystemModelsResponse>> {
+    return this.request<SystemModelsResponse>('/api/system/models', {}, 10000);
+  }
+
+  /**
+   * Fetch currently loaded Ollama models: GET /api/system/models/running
+   */
+  public async getRunningModels(): Promise<ApiResponse<RunningModelsResponse>> {
+    return this.request<RunningModelsResponse>('/api/system/models/running', {}, 10000);
+  }
+
+  /**
+   * Load an installed Ollama model with resource checks: POST /api/system/models/load
+   */
+  public async loadSystemModel(
+    modelName: string,
+    keepAlive?: string
+  ): Promise<ApiResponse<ModelOperationResponse>> {
+    return this.request<ModelOperationResponse>(
+      '/api/system/models/load',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          model_name: modelName,
+          keep_alive: keepAlive ?? null,
+        }),
+      },
+      65000
+    );
+  }
+
+  /**
+   * Safely unload a running Ollama model: POST /api/system/models/unload
+   */
+  public async unloadSystemModel(
+    modelName: string
+  ): Promise<ApiResponse<ModelOperationResponse>> {
+    return this.request<ModelOperationResponse>(
+      '/api/system/models/unload',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          model_name: modelName,
+        }),
+      },
+      15000
+    );
+  }
+
+  // ===========================================================================
+  // Local Persistent AI Memory Management API (Phase 1B)
+  // ===========================================================================
+
+  /**
+   * Fetch paginated local long-term AI memories: GET /api/memory
+   */
+  public async getMemories(
+    limit: number = 50,
+    offset: number = 0,
+    memoryType?: string,
+    profileId?: string
+  ): Promise<ApiResponse<MemoryListResponse>> {
+    const params = new URLSearchParams();
+    params.set('limit', String(limit));
+    params.set('offset', String(offset));
+    if (profileId) {
+      params.set('profile_id', profileId);
+    }
+    if (memoryType && memoryType !== 'all') {
+      params.set('memory_type', memoryType);
+    }
+    return this.request<MemoryListResponse>(`/api/memory?${params.toString()}`, {}, 10000);
+  }
+
+  /**
+   * Full-text search local long-term AI memories: GET /api/memory/search
+   */
+  public async searchMemories(
+    query: string,
+    limit: number = 25,
+    memoryType?: string,
+    profileId?: string
+  ): Promise<ApiResponse<MemorySearchResponse>> {
+    const params = new URLSearchParams();
+    params.set('q', query);
+    params.set('limit', String(limit));
+    if (profileId) {
+      params.set('profile_id', profileId);
+    }
+    if (memoryType && memoryType !== 'all') {
+      params.set('memory_type', memoryType);
+    }
+    return this.request<MemorySearchResponse>(`/api/memory/search?${params.toString()}`, {}, 10000);
+  }
+
+  /**
+   * Fetch single memory item by ID: GET /api/memory/{memory_id}
+   */
+  public async getMemory(memoryId: string): Promise<ApiResponse<MemoryItem>> {
+    return this.request<MemoryItem>(
+      `/api/memory/${encodeURIComponent(memoryId)}`,
+      {},
+      8000
+    );
+  }
+
+  /**
+   * Store a new local long-term memory item: POST /api/memory
+   */
+  public async createMemory(payload: MemoryCreateRequest): Promise<ApiResponse<MemoryItem>> {
+    return this.request<MemoryItem>(
+      '/api/memory',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      10000
+    );
+  }
+
+  /**
+   * Update an existing local memory item: PATCH /api/memory/{memory_id}
+   */
+  public async updateMemory(
+    memoryId: string,
+    payload: MemoryUpdateRequest
+  ): Promise<ApiResponse<MemoryItem>> {
+    return this.request<MemoryItem>(
+      `/api/memory/${encodeURIComponent(memoryId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      },
+      10000
+    );
+  }
+
+  /**
+   * Delete a stored local memory item: DELETE /api/memory/{memory_id}
+   */
+  public async deleteMemory(memoryId: string): Promise<ApiResponse<MemoryDeleteResponse>> {
+    return this.request<MemoryDeleteResponse>(
+      `/api/memory/${encodeURIComponent(memoryId)}`,
+      {
+        method: 'DELETE',
+      },
+      10000
+    );
+  }
+
+  // ==========================================================================
+  // Personalization Endpoints (Phase 2A)
+  // ==========================================================================
+
+  /**
+   * List explicit user preferences: GET /api/personalization
+   */
+  public async getPreferences(params?: {
+    profile_id?: string;
+    category?: string;
+    enabled_only?: boolean;
+    limit?: number;
+    offset?: number;
+  }): Promise<ApiResponse<PreferenceListResponse>> {
+    const query = new URLSearchParams();
+    if (params?.profile_id) query.set('profile_id', params.profile_id);
+    if (params?.category) query.set('category', params.category);
+    if (params?.enabled_only !== undefined) query.set('enabled_only', String(params.enabled_only));
+    if (params?.limit !== undefined) query.set('limit', String(params.limit));
+    if (params?.offset !== undefined) query.set('offset', String(params.offset));
+    const qs = query.toString();
+    return this.request<PreferenceListResponse>(
+      `/api/personalization${qs ? `?${qs}` : ''}`,
+      {},
+      10000
+    );
+  }
+
+  /**
+   * Get a single preference: GET /api/personalization/{preference_id}
+   */
+  public async getPreference(preferenceId: string): Promise<ApiResponse<PreferenceItem>> {
+    return this.request<PreferenceItem>(
+      `/api/personalization/${encodeURIComponent(preferenceId)}`,
+      {},
+      10000
+    );
+  }
+
+  /**
+   * Create a new explicit user preference: POST /api/personalization
+   */
+  public async createPreference(
+    payload: PreferenceCreateRequest
+  ): Promise<ApiResponse<PreferenceItem>> {
+    return this.request<PreferenceItem>(
+      '/api/personalization',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      10000
+    );
+  }
+
+  /**
+   * Update an existing preference: PATCH /api/personalization/{preference_id}
+   */
+  public async updatePreference(
+    preferenceId: string,
+    payload: PreferenceUpdateRequest
+  ): Promise<ApiResponse<PreferenceItem>> {
+    return this.request<PreferenceItem>(
+      `/api/personalization/${encodeURIComponent(preferenceId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      },
+      10000
+    );
+  }
+
+  /**
+   * Delete an explicit user preference: DELETE /api/personalization/{preference_id}
+   */
+  public async deletePreference(
+    preferenceId: string
+  ): Promise<ApiResponse<PreferenceDeleteResponse>> {
+    return this.request<PreferenceDeleteResponse>(
+      `/api/personalization/${encodeURIComponent(preferenceId)}`,
+      {
+        method: 'DELETE',
+      },
+      10000
+    );
+  }
+
+  // ==========================================================================
+  // Multi-Profile Endpoints (Phase 2B)
+  // ==========================================================================
+
+  /**
+   * List all local profiles and the currently active profile: GET /api/profiles
+   */
+  public async getProfiles(): Promise<ApiResponse<ProfileListResponse>> {
+    return this.request<ProfileListResponse>('/api/profiles', {}, 10000);
+  }
+
+  /**
+   * Get the currently active local profile: GET /api/profiles/active
+   */
+  public async getActiveProfile(): Promise<ApiResponse<ProfileItem>> {
+    return this.request<ProfileItem>('/api/profiles/active', {}, 10000);
+  }
+
+  /**
+   * Create a new local profile: POST /api/profiles
+   */
+  public async createProfile(
+    payload: ProfileCreateRequest
+  ): Promise<ApiResponse<ProfileItem>> {
+    return this.request<ProfileItem>(
+      '/api/profiles',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      10000
+    );
+  }
+
+  /**
+   * Update a local profile: PATCH /api/profiles/{profile_id}
+   */
+  public async updateProfile(
+    profileId: string,
+    payload: ProfileUpdateRequest
+  ): Promise<ApiResponse<ProfileItem>> {
+    return this.request<ProfileItem>(
+      `/api/profiles/${encodeURIComponent(profileId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      },
+      10000
+    );
+  }
+
+  /**
+   * Switch active local profile: POST /api/profiles/{profile_id}/activate
+   */
+  public async activateProfile(profileId: string): Promise<ApiResponse<ProfileItem>> {
+    return this.request<ProfileItem>(
+      `/api/profiles/${encodeURIComponent(profileId)}/activate`,
+      {
+        method: 'POST',
+      },
+      10000
+    );
+  }
+
+  /**
+   * Delete an eligible local profile: DELETE /api/profiles/{profile_id}
+   */
+  public async deleteProfile(
+    profileId: string
+  ): Promise<ApiResponse<ProfileDeleteResponse>> {
+    return this.request<ProfileDeleteResponse>(
+      `/api/profiles/${encodeURIComponent(profileId)}`,
+      {
+        method: 'DELETE',
+      },
+      10000
+    );
+  }
+
+  // ============================================================================
+  // Screen Awareness & Local Vision Endpoints
+  // ============================================================================
+
+  public async getScreenVisionStatus(): Promise<ApiResponse<VisionAvailabilityStatus>> {
+    return this.request<VisionAvailabilityStatus>('/api/screen/status', {}, 10000);
+  }
+
+  public async captureScreen(
+    confirmed: boolean = true,
+    profileId?: string
+  ): Promise<ApiResponse<ScreenCaptureResponse>> {
+    return this.request<ScreenCaptureResponse>(
+      '/api/screen/capture',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          confirmed,
+          profile_id: profileId || undefined,
+          include_preview: true,
+        }),
+      },
+      15000
+    );
+  }
+
+  public async deleteScreenCapture(
+    captureId: string,
+    profileId?: string
+  ): Promise<ApiResponse<{ capture_id: string; removed: boolean; profile_id: string }>> {
+    const query = profileId ? `?profile_id=${encodeURIComponent(profileId)}` : '';
+    return this.request<{ capture_id: string; removed: boolean; profile_id: string }>(
+      `/api/screen/capture/${encodeURIComponent(captureId)}${query}`,
+      {
+        method: 'DELETE',
+      },
+      10000
+    );
+  }
+
+  // ============================================================================
+  // AI Email Assistant API (Phase 4D)
+  // ============================================================================
+
+  public async getEmailAccountStatus(
+    profileId?: string
+  ): Promise<ApiResponse<EmailAccountStatusResponse>> {
+    const query = profileId ? `?profile_id=${encodeURIComponent(profileId)}` : '';
+    return this.request<EmailAccountStatusResponse>(`/api/email/account${query}`, {}, 10000);
+  }
+
+  public async configureEmailAccount(payload: {
+    profile_id?: string;
+    email_address: string;
+    password: string;
+    imap_host: string;
+    imap_port: number;
+    smtp_host: string;
+    smtp_port: number;
+    use_starttls: boolean;
+    display_name?: string;
+    authorized_by_user: boolean;
+  }): Promise<ApiResponse<EmailAccountStatusResponse>> {
+    return this.request<EmailAccountStatusResponse>(
+      '/api/email/account',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      15000
+    );
+  }
+
+  public async disconnectEmailAccount(
+    profileId?: string
+  ): Promise<ApiResponse<{ success: boolean; disconnected: boolean; profile_id: string }>> {
+    const query = profileId ? `?profile_id=${encodeURIComponent(profileId)}` : '';
+    return this.request<{ success: boolean; disconnected: boolean; profile_id: string }>(
+      `/api/email/account${query}`,
+      { method: 'DELETE' },
+      10000
+    );
+  }
+
+  public async listEmailDrafts(
+    profileId?: string
+  ): Promise<ApiResponse<{ drafts: EmailDraftItem[] }>> {
+    const query = profileId ? `?profile_id=${encodeURIComponent(profileId)}` : '';
+    return this.request<{ drafts: EmailDraftItem[] }>(`/api/email/drafts${query}`, {}, 10000);
+  }
+
+  public async updateEmailDraft(
+    draftId: string,
+    payload: { profile_id?: string; to?: string[]; subject?: string; body?: string }
+  ): Promise<ApiResponse<{ success: boolean; draft: EmailDraftItem }>> {
+    return this.request<{ success: boolean; draft: EmailDraftItem }>(
+      `/api/email/drafts/${encodeURIComponent(draftId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      },
+      10000
+    );
+  }
+
+  public async requestEmailSendConfirmation(
+    draftId: string,
+    profileId?: string
+  ): Promise<ApiResponse<EmailDraftSendConfirmationResponse>> {
+    const query = profileId ? `?profile_id=${encodeURIComponent(profileId)}` : '';
+    return this.request<EmailDraftSendConfirmationResponse>(
+      `/api/email/drafts/${encodeURIComponent(draftId)}/request-send${query}`,
+      { method: 'POST' },
+      10000
+    );
+  }
+
+  public async confirmAndSendEmail(
+    draftId: string,
+    payload: { profile_id?: string; confirmation_token: string; approved: boolean }
+  ): Promise<ApiResponse<{ success: boolean; status: string; draft: EmailDraftItem; message: string }>> {
+    return this.request<{ success: boolean; status: string; draft: EmailDraftItem; message: string }>(
+      `/api/email/drafts/${encodeURIComponent(draftId)}/send`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      20000
+    );
+  }
+
+  // ============================================================================
+  // Wake-on-Startup API (Phase 5A)
+  // ============================================================================
+
+  public async getStartupStatus(): Promise<ApiResponse<SystemStartupStatus>> {
+    return this.request<SystemStartupStatus>('/api/system/startup', {}, 10000);
+  }
+
+  public async updateStartupStatus(
+    enabled: boolean
+  ): Promise<ApiResponse<SystemStartupStatus>> {
+    return this.request<SystemStartupStatus>(
+      '/api/system/startup',
+      {
+        method: 'POST',
+        body: JSON.stringify({ enabled }),
+      },
+      10000
+    );
+  }
+
+  // ============================================================================
+  // Native Desktop Notifications API (Phase 5C)
+  // ============================================================================
+
+  public async getNotificationStatus(): Promise<ApiResponse<NotificationStatusResponse>> {
+    return this.request<NotificationStatusResponse>('/api/system/notifications', {}, 10000);
+  }
+
+  public async updateNotificationPreferences(
+    updates: Partial<NotificationPreferences>
+  ): Promise<ApiResponse<NotificationStatusResponse>> {
+    return this.request<NotificationStatusResponse>(
+      '/api/system/notifications',
+      {
+        method: 'POST',
+        body: JSON.stringify(updates),
+      },
+      10000
+    );
+  }
+
+  public async resetNotificationPreferences(): Promise<ApiResponse<NotificationStatusResponse>> {
+    return this.request<NotificationStatusResponse>(
+      '/api/system/notifications/reset',
+      {
+        method: 'POST',
+        body: JSON.stringify({}),
+      },
+      10000
+    );
+  }
+
+  public async sendTestNotification(): Promise<ApiResponse<NotificationTestResponse>> {
+    return this.request<NotificationTestResponse>(
+      '/api/system/notifications/test',
+      {
+        method: 'POST',
+        body: JSON.stringify({}),
+      },
+      10000
+    );
+  }
+
+  // ============================================================================
+  // Custom Automation Builder API (Phase 6A)
+  // ============================================================================
+
+  public async previewAutomation(prompt: string): Promise<ApiResponse<AutomationPreviewResponse>> {
+    return this.request<AutomationPreviewResponse>(
+      '/api/automations/preview',
+      {
+        method: 'POST',
+        body: JSON.stringify({ prompt }),
+      },
+      15000
+    );
+  }
+
+  public async listAutomations(): Promise<ApiResponse<{ automations: CustomAutomation[] }>> {
+    return this.request<{ automations: CustomAutomation[] }>('/api/automations', {}, 10000);
+  }
+
+  public async createAutomation(payload: {
+    name: string;
+    description: string;
+    trigger_type: AutomationTriggerType;
+    trigger_config: AutomationTriggerConfig;
+    steps: AutomationStep[];
+    enabled?: boolean;
+  }): Promise<ApiResponse<CustomAutomation>> {
+    return this.request<CustomAutomation>(
+      '/api/automations',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      10000
+    );
+  }
+
+  public async toggleAutomation(
+    automationId: string,
+    enabled: boolean
+  ): Promise<ApiResponse<CustomAutomation>> {
+    return this.request<CustomAutomation>(
+      `/api/automations/${encodeURIComponent(automationId)}/toggle`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ enabled }),
+      },
+      10000
+    );
+  }
+
+  public async updateAutomationSchedule(
+    automationId: string,
+    schedule: AutomationTriggerConfig
+  ): Promise<ApiResponse<CustomAutomation>> {
+    return this.request<CustomAutomation>(
+      `/api/automations/${encodeURIComponent(automationId)}/schedule`,
+      {
+        method: 'POST',
+        body: JSON.stringify(schedule),
+      },
+      10000
+    );
+  }
+
+  public async deleteAutomation(
+    automationId: string
+  ): Promise<ApiResponse<{ deleted: boolean; automation_id: string }>> {
+    return this.request<{ deleted: boolean; automation_id: string }>(
+      `/api/automations/${encodeURIComponent(automationId)}`,
+      { method: 'DELETE' },
+      10000
+    );
+  }
+
+  public async executeAutomation(
+    automationId: string,
+    confirmationToken?: string
+  ): Promise<ApiResponse<AutomationExecutionStatus>> {
+    return this.request<AutomationExecutionStatus>(
+      `/api/automations/${encodeURIComponent(automationId)}/execute`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ confirmation_token: confirmationToken || null }),
+      },
+      60000
+    );
+  }
+
+  public async cancelAutomationExecution(
+    executionId: string
+  ): Promise<ApiResponse<AutomationExecutionStatus>> {
+    return this.request<AutomationExecutionStatus>(
+      `/api/automations/executions/${encodeURIComponent(executionId)}/cancel`,
+      {
+        method: 'POST',
+        body: JSON.stringify({}),
+      },
+      10000
+    );
+  }
+
+  // ============================================================================
+  // Automation History & Management API (Phase 6B)
+  // ============================================================================
+
+  public async listAutomationHistory(params?: {
+    automation_id?: string;
+    status?: string;
+    trigger_type?: string;
+    date_from?: string;
+    date_to?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<ApiResponse<AutomationExecutionHistoryListResponse>> {
+    const qs = new URLSearchParams();
+    if (params?.automation_id) qs.set('automation_id', params.automation_id);
+    if (params?.status) qs.set('status', params.status);
+    if (params?.trigger_type) qs.set('trigger_type', params.trigger_type);
+    if (params?.date_from) qs.set('date_from', params.date_from);
+    if (params?.date_to) qs.set('date_to', params.date_to);
+    if (params?.limit !== undefined) qs.set('limit', String(params.limit));
+    if (params?.offset !== undefined) qs.set('offset', String(params.offset));
+    const query = qs.toString() ? `?${qs.toString()}` : '';
+    return this.request<AutomationExecutionHistoryListResponse>(
+      `/api/automations/history${query}`,
+      {},
+      10000
+    );
+  }
+
+  public async getAutomationExecution(
+    executionId: string
+  ): Promise<ApiResponse<AutomationExecutionStatus>> {
+    return this.request<AutomationExecutionStatus>(
+      `/api/automations/executions/${encodeURIComponent(executionId)}`,
+      {},
+      10000
+    );
+  }
+
+  public async retryAutomationExecution(
+    executionId: string,
+    allowRerunWithSideEffects: boolean = false
+  ): Promise<ApiResponse<AutomationExecutionStatus>> {
+    return this.request<AutomationExecutionStatus>(
+      `/api/automations/executions/${encodeURIComponent(executionId)}/retry`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ allow_rerun_with_side_effects: allowRerunWithSideEffects }),
+      },
+      60000
+    );
+  }
+
+  public async deleteAutomationHistory(
+    executionId: string
+  ): Promise<ApiResponse<{ deleted: boolean; execution_id: string }>> {
+    return this.request<{ deleted: boolean; execution_id: string }>(
+      `/api/automations/executions/${encodeURIComponent(executionId)}`,
+      { method: 'DELETE' },
+      10000
+    );
+  }
+
+  public async clearAutomationHistory(
+    confirm: boolean = true
+  ): Promise<ApiResponse<{ cleared: boolean; deleted_count: number; profile_id: string }>> {
+    return this.request<{ cleared: boolean; deleted_count: number; profile_id: string }>(
+      `/api/automations/history?confirm=${confirm ? 'true' : 'false'}`,
+      { method: 'DELETE' },
+      10000
+    );
+  }
+
+  // ============================================================================
+  // Three-Mode AI Provider & BYOK API (Phases 8A–8B)
+  // ============================================================================
+
+  public async getProviders(): Promise<ApiResponse<ProvidersListResponse>> {
+    return this.request<ProvidersListResponse>('/api/providers', {}, 10000);
+  }
+
+  public async getActiveProvider(): Promise<ApiResponse<ActiveProviderResponse>> {
+    return this.request<ActiveProviderResponse>('/api/providers/active', {}, 10000);
+  }
+
+  public async selectProvider(
+    providerId: AIProviderId | string,
+    config?: Record<string, unknown>
+  ): Promise<ApiResponse<{ profile_config: ProfileProviderConfig; health: AIProviderHealth }>> {
+    return this.request<{ profile_config: ProfileProviderConfig; health: AIProviderHealth }>(
+      '/api/providers/select',
+      {
+        method: 'POST',
+        body: JSON.stringify({ provider_id: providerId, config: config ?? null }),
+      },
+      15000
+    );
+  }
+
+  public async configureOpenAIBYOK(payload: {
+    api_key: string;
+    model?: string;
+    validate_connection?: boolean;
+  }): Promise<ApiResponse<OpenAIBYOKConfigureResponse>> {
+    return this.request<OpenAIBYOKConfigureResponse>(
+      '/api/providers/byok/openai/configure',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      20000
+    );
+  }
+
+  public async validateOpenAIBYOK(payload?: {
+    api_key?: string;
+    model?: string;
+  }): Promise<ApiResponse<OpenAIBYOKValidateResponse>> {
+    return this.request<OpenAIBYOKValidateResponse>(
+      '/api/providers/byok/openai/validate',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload ?? {}),
+      },
+      20000
+    );
+  }
+
+  public async setOpenAIBYOKModel(
+    model: string
+  ): Promise<ApiResponse<{ profile_config: ProfileProviderConfig }>> {
+    return this.request<{ profile_config: ProfileProviderConfig }>(
+      '/api/providers/byok/openai/model',
+      {
+        method: 'POST',
+        body: JSON.stringify({ model }),
+      },
+      10000
+    );
+  }
+
+  public async removeOpenAIBYOKCredentials(): Promise<
+    ApiResponse<{ profile_config: ProfileProviderConfig; removed: boolean }>
+  > {
+    return this.request<{ profile_config: ProfileProviderConfig; removed: boolean }>(
+      '/api/providers/byok/openai/credentials',
+      { method: 'DELETE' },
+      10000
     );
   }
 }

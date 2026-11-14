@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { ShieldAlert, Shield } from 'lucide-react';
+import { ShieldAlert, Shield, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { EmergencyStopStatus } from '../../api/types';
 import apiClient from '../../api/client';
 import { NAV_ITEMS } from './navTypes';
@@ -10,6 +10,8 @@ interface SidebarProps {
   isOpen: boolean;
   onClose: () => void;
   emergencyStatus: EmergencyStopStatus | null;
+  isCollapsed?: boolean;
+  onToggleCollapse?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -18,6 +20,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   isOpen,
   onClose,
   emergencyStatus,
+  isCollapsed = false,
+  onToggleCollapse,
 }) => {
   const isEmergencyActive = emergencyStatus?.is_active ?? false;
   const [appVersion, setAppVersion] = useState<string>('');
@@ -52,20 +56,34 @@ export const Sidebar: React.FC<SidebarProps> = ({
         />
       )}
 
-      <aside className={`sidebar ${isOpen ? 'open' : ''}`}>
+      <aside className={`sidebar ${isOpen ? 'open' : ''} ${isCollapsed ? 'collapsed' : ''}`}>
         {/* Brand Header */}
         <div className="sidebar-header">
-          <div className="brand-logo">
-            <img
-              src="/voxpilot-logo.png"
-              alt="VoxPilot Logo"
-              className="brand-logo-img"
-            />
+          <div className="sidebar-brand-group">
+            <div className="brand-logo">
+              <img
+                src="/voxpilot-logo.png"
+                alt="VoxPilot Logo"
+                className="brand-logo-img"
+              />
+            </div>
+            <div className="brand-text">
+              <span className="brand-title">VoxPilot</span>
+              <span className="brand-subtitle">AI Desktop Agent</span>
+            </div>
           </div>
-          <div className="brand-text">
-            <span className="brand-title">VoxPilot</span>
-            <span className="brand-subtitle">AI Desktop Agent</span>
-          </div>
+
+          {onToggleCollapse && (
+            <button
+              type="button"
+              className="sidebar-collapse-btn"
+              onClick={onToggleCollapse}
+              aria-label={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              title={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            >
+              {isCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
+            </button>
+          )}
         </div>
 
         {/* Navigation List */}
@@ -86,7 +104,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 title={!item.isFunctional ? `${item.label} (Planned for upcoming phase)` : item.label}
               >
                 {item.icon}
-                <span>{item.label}</span>
+                <span className="nav-item-label">{item.label}</span>
                 {item.badge && <span className="nav-badge">{item.badge}</span>}
               </button>
             );

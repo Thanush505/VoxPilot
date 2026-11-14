@@ -486,13 +486,32 @@ class ToolRegistry:
             return True, action_type, params
 
         # 2. File overwrite actions
-        if canonical in ("create_file", "copy_file", "move_file", "rename_item"):
+        if canonical in ("create_file", "copy_file", "move_file", "copy_item", "move_item", "rename_item"):
             if raw_params.get("confirm_overwrite") is True:
                 return True, f"{canonical}_overwrite", params
 
+        # 2b. Closing a window may discard unsaved work
+        if canonical == "manage_window" and str(params.get("action") or "").strip().lower() == "close":
+            return True, "close_window", params
+
         # 3. Consequential browser actions
-        if canonical == "click_element" and raw_params.get("is_consequential"):
-            return True, "browser_consequential_click", {"selector": raw_params.get("selector")}
+        if canonical == "click_element":
+            sel_lower = str(raw_params.get("selector") or "").lower()
+            is_conseq = bool(raw_params.get("is_consequential")) or any(
+                kw in sel_lower
+                for kw in ("submit", "purchase", "buy", "checkout", "pay", "send", "upload", "delete-account", "confirm-order")
+            )
+            if is_conseq:
+                return True, "browser_consequential_click", {"selector": raw_params.get("selector")}
+
+        if canonical == "enter_text":
+            sel_lower = str(raw_params.get("selector") or "").lower()
+            is_sensitive_input = bool(raw_params.get("is_consequential")) or any(
+                kw in sel_lower
+                for kw in ("password", "passwd", "passcode", "card", "cvv", "cvc", "ssn", "pin", "secret")
+            )
+            if is_sensitive_input:
+                return True, "browser_consequential_input", {"selector": raw_params.get("selector")}
 
         # 4. Browser download overwrite
         if canonical == "download_file" and raw_params.get("confirm_overwrite"):

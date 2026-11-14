@@ -76,6 +76,15 @@ class SearchFilesInput(BaseModel):
         ge=1,
         le=200,
     )
+    modified_within_days: Optional[int] = Field(
+        None,
+        description="Optional filter for files modified within the last N days.",
+        ge=0,
+    )
+    sort_by: str = Field(
+        "name",
+        description="Sort order for search results: 'name' or 'modified'.",
+    )
 
 
 class GetFileMetadataInput(BaseModel):
@@ -97,7 +106,7 @@ class CreateFolderInput(BaseModel):
 
 
 class CreateFileInput(BaseModel):
-    """Pydantic schema for creating a new empty file in an approved directory."""
+    """Pydantic schema for creating a new file in an approved directory."""
     file_path: str = Field(
         ...,
         description="Path of the new file to create.",
@@ -106,6 +115,10 @@ class CreateFileInput(BaseModel):
     confirm_overwrite: bool = Field(
         False,
         description="Explicit confirmation to overwrite if file already exists.",
+    )
+    content: Optional[str] = Field(
+        None,
+        description="Optional UTF-8 text content to write to the created file.",
     )
 
 
@@ -293,6 +306,8 @@ def search_files_tool(
             extension=data.extension,
             max_depth=data.max_depth,
             max_results=data.max_results,
+            modified_within_days=data.modified_within_days,
+            sort_by=data.sort_by,
         )
         items_dict = [fi.to_dict() for fi in file_infos]
 
@@ -435,7 +450,11 @@ def create_file_tool(
     now_ts = datetime.now(timezone.utc).isoformat()
 
     try:
-        res = mgr.create_file(data.file_path, confirm_overwrite=data.confirm_overwrite)
+        res = mgr.create_file(
+            data.file_path,
+            confirm_overwrite=data.confirm_overwrite,
+            content=data.content,
+        )
         return FileActionResult(
             success=True,
             operation="create_file",

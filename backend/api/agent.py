@@ -106,6 +106,9 @@ class ExecuteRequest(BaseModel):
     user_input: str = Field(..., min_length=1, description="Natural language request or command.")
     execution_id: Optional[str] = Field(None, description="Optional custom identifier for the execution.")
     conversation_id: Optional[str] = Field(None, description="Optional conversation session identifier.")
+    profile_id: Optional[str] = Field(None, description="Optional target profile identifier (defaults to active profile).")
+    capture_id: Optional[str] = Field(None, description="Optional ephemeral screen capture identifier for visual Q&A.")
+    clear_capture_after_use: bool = Field(True, description="Whether to scrub temporary screenshot data after execution.")
 
 
 class ConfirmationApprovalRequest(BaseModel):
@@ -244,6 +247,15 @@ def _verify_trusted_request(request: Request) -> None:
 # API Endpoints
 # ==============================================================================
 
+def _resolve_api_profile_id(agent: VoxPilotAgent, explicit_profile_id: Optional[str]) -> str:
+    if explicit_profile_id and isinstance(explicit_profile_id, str) and explicit_profile_id.strip():
+        return explicit_profile_id.strip()
+    try:
+        return agent.profile_service.get_active_profile_id()
+    except Exception:
+        return "default"
+
+
 @router.post("/execute", response_model=ExecutionStatusResponse)
 async def execute_request(request: ExecuteRequest):
     """Execute a user natural language command through the LangGraph agent workflow."""
@@ -261,7 +273,20 @@ async def execute_request(request: ExecuteRequest):
                 user_input=request.user_input.strip(),
                 execution_id=request.execution_id,
                 conversation_id=request.conversation_id,
+                profile_id=request.profile_id,
+                capture_id=request.capture_id,
+                clear_capture_after_use=request.clear_capture_after_use,
             )
+        )
+    except PermissionError as perm_err:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(perm_err),
+        )
+    except ValueError as val_err:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(val_err),
         )
     except Exception as err:
         logger.error(f"Error processing agent execution: {err}", exc_info=True)
@@ -283,17 +308,27 @@ async def execute_request(request: ExecuteRequest):
 
 
 @router.get("/status/{execution_id}", response_model=ExecutionStatusResponse)
-async def get_execution_status(execution_id: str):
+async def get_execution_status(
+    execution_id: str,
+    profile_id: Optional[str] = Query(None),
+):
     """Fetch the current status and execution history for a specific execution ID."""
-    # Check in-memory store first
+    agent = get_agent()
+    target_profile = _resolve_api_profile_id(agent, profile_id)
+
+    # Check in-memory store first (enforce profile ownership)
     state = get_execution(execution_id)
     if state:
+        if (state.get("profile_id") or "default") != target_profile:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Execution session '{execution_id}' not found.",
+            )
         return state
 
     # Query persistent SQLite database repository
-    agent = get_agent()
     try:
-        record = await agent.repository.get_execution(execution_id)
+        record = await agent.repository.get_execution(execution_id, profile_id=target_profile)
         if record:
             steps = await agent.repository.get_execution_steps(execution_id)
             completed_steps = [s.to_dict() for s in steps if s.execution_status == "completed"]
@@ -326,11 +361,17 @@ async def get_execution_status(execution_id: str):
 async def list_conversations(
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    profile_id: Optional[str] = Query(None),
 ):
-    """List stored conversations ordered by most recent activity."""
+    """List stored conversations ordered by most recent activity, scoped to profile."""
     agent = get_agent()
+    target_profile = _resolve_api_profile_id(agent, profile_id)
     try:
-        convs = await agent.repository.list_conversations(limit=limit, offset=offset)
+        convs = await agent.repository.list_conversations(
+            limit=limit,
+            offset=offset,
+            profile_id=target_profile,
+        )
         return [
             ConversationInfo(
                 conversation_id=c.conversation_id,
@@ -347,17 +388,24 @@ async def list_conversations(
 
 
 @router.get("/conversations/{conversation_id}", response_model=ConversationDetailResponse)
-async def get_conversation_details(conversation_id: str):
+async def get_conversation_details(
+    conversation_id: str,
+    profile_id: Optional[str] = Query(None),
+):
     """Retrieve metadata, turn summary, and context for an isolated conversation."""
     agent = get_agent()
-    record = await agent.repository.get_conversation(conversation_id)
+    target_profile = _resolve_api_profile_id(agent, profile_id)
+    record = await agent.repository.get_conversation(conversation_id, profile_id=target_profile)
     if not record:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Conversation '{conversation_id}' not found.",
         )
 
-    executions = await agent.repository.list_executions_for_conversation(conversation_id)
+    executions = await agent.repository.list_executions_for_conversation(
+        conversation_id,
+        profile_id=target_profile,
+    )
     ctx = agent.context_manager.get_context(conversation_id)
     return ConversationDetailResponse(
         conversation_id=record.conversation_id,
@@ -371,17 +419,24 @@ async def get_conversation_details(conversation_id: str):
 
 
 @router.get("/conversations/{conversation_id}/executions", response_model=List[ExecutionStatusResponse])
-async def list_conversation_executions(conversation_id: str):
+async def list_conversation_executions(
+    conversation_id: str,
+    profile_id: Optional[str] = Query(None),
+):
     """Retrieve all execution records belonging to a conversation."""
     agent = get_agent()
-    record = await agent.repository.get_conversation(conversation_id)
+    target_profile = _resolve_api_profile_id(agent, profile_id)
+    record = await agent.repository.get_conversation(conversation_id, profile_id=target_profile)
     if not record:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Conversation '{conversation_id}' not found.",
         )
 
-    records = await agent.repository.list_executions_for_conversation(conversation_id)
+    records = await agent.repository.list_executions_for_conversation(
+        conversation_id,
+        profile_id=target_profile,
+    )
     results = []
     for r in records:
         results.append(
@@ -776,6 +831,8 @@ class VoiceConfigUpdateRequest(BaseModel):
     tts_enabled: Optional[bool] = Field(None, description="Enable or disable Piper text-to-speech playback.")
     piper_voice: Optional[str] = Field(None, description="Installed Piper ONNX voice model filename.")
     streaming_vad_enabled: Optional[bool] = Field(None, description="Enable or disable dynamic WebRTC streaming VAD.")
+    wake_word_enabled: Optional[bool] = Field(None, description="Enable or disable optional openWakeWord activation.")
+    wake_word_cooldown_seconds: Optional[float] = Field(None, ge=0.5, le=30.0, description="Cooldown seconds between wake-word activations.")
 
 
 class VoiceShortcutUpdateRequest(BaseModel):
@@ -839,6 +896,38 @@ async def toggle_voice_mode_endpoint(
     return await anyio.to_thread.run_sync(
         functools.partial(voice_service.toggle_voice_mode, conversation_id=conv_id, source="ui")
     )
+
+
+@router.post("/voice/interrupt")
+async def interrupt_voice_endpoint(http_request: Request):
+    """Immediately interrupt active speech playback or voice recording."""
+    _verify_trusted_request(http_request)
+    voice_service = get_shared_voice_service()
+    return await anyio.to_thread.run_sync(
+        functools.partial(voice_service.interrupt_voice, reason="Interrupted by user")
+    )
+
+
+@router.post("/voice/ptt/start")
+async def start_push_to_talk_endpoint(
+    http_request: Request,
+    req: Optional[VoiceStartRequest] = None,
+):
+    """Start push-to-talk microphone recording."""
+    _verify_trusted_request(http_request)
+    voice_service = get_shared_voice_service()
+    conv_id = req.conversation_id if req else None
+    return await anyio.to_thread.run_sync(
+        functools.partial(voice_service.start_push_to_talk, conversation_id=conv_id)
+    )
+
+
+@router.post("/voice/ptt/stop")
+async def stop_push_to_talk_endpoint(http_request: Request):
+    """Stop push-to-talk recording, transcribe locally, and execute agent."""
+    _verify_trusted_request(http_request)
+    voice_service = get_shared_voice_service()
+    return await anyio.to_thread.run_sync(voice_service.stop_push_to_talk)
 
 
 @router.get("/voice/config")

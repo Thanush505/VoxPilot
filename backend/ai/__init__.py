@@ -1,0 +1,83 @@
+"""
+VoxPilot - Local AI Runtime Services
+Provides hardware telemetry collection (HardwareMonitor) and safe local Ollama
+model lifecycle management (ModelManager).
+"""
+
+from backend.ai.hardware_monitor import (
+    CpuMetrics,
+    GpuMetrics,
+    HardwareMonitor,
+    HardwareSnapshot,
+    OllamaInstalledModel,
+    OllamaRunningModel,
+    OllamaTelemetry,
+    RamMetrics,
+    get_shared_hardware_monitor,
+    reset_shared_hardware_monitor,
+    set_shared_hardware_monitor,
+)
+from backend.ai.model_manager import (
+    DEFAULT_PRIMARY_MODEL,
+    ActiveInferenceConflictError,
+    ConcurrentModelOperationError,
+    InsufficientResourcesError,
+    InvalidModelNameError,
+    ModelLoadTimeoutError,
+    ModelManager,
+    ModelManagerError,
+    ModelNotFoundError,
+    ModelOperationResult,
+    ModelResourcePolicy,
+    OllamaConnectionError,
+    ResourceCheckResult,
+    get_shared_model_manager,
+    reset_shared_model_manager,
+    set_shared_model_manager,
+)
+from backend.ai.vision import (
+    EphemeralScreenCapture,
+    OllamaVisionProvider,
+    ScreenCaptureAccessDeniedError,
+    ScreenCaptureAuthorizationError,
+    ScreenCaptureError,
+    ScreenCaptureNotFoundError,
+    ScreenCaptureService,
+    VisionAnalysisResult,
+    VisionAvailabilityStatus,
+    VisionModelRecommendation,
+    VisionProvider,
+    get_shared_screen_capture_service,
+    get_shared_vision_provider,
+    set_shared_vision_provider,
+)
+
+__all__ = [
+    "CpuMetrics",
+    "RamMetrics",
+    "GpuMetrics",
+    "OllamaInstalledModel",
+    "OllamaRunningModel",
+    "OllamaTelemetry",
+    "HardwareSnapshot",
+    "HardwareMonitor",
+    "get_shared_hardware_monitor",
+    "set_shared_hardware_monitor",
+    "reset_shared_hardware_monitor",
+    "DEFAULT_PRIMARY_MODEL",
+    "ModelResourcePolicy",
+    "ResourceCheckResult",
+    "ModelOperationResult",
+    "ModelManager",
+    "ModelManagerError",
+    "InvalidModelNameError",
+    "ModelNotFoundError",
+    "OllamaConnectionError",
+    "ModelLoadTimeoutError",
+    "InsufficientResourcesError",
+    "ActiveInferenceConflictError",
+    "ConcurrentModelOperationError",
+    "get_shared_model_manager",
+    "set_shared_model_manager",
+    "reset_shared_model_manager",
+]

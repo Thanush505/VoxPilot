@@ -13,6 +13,8 @@ import logging
 from typing import Optional, Dict, Any
 import ollama
 
+from backend.ai.model_manager import get_shared_model_manager
+
 logger = logging.getLogger(__name__)
 
 
@@ -72,6 +74,7 @@ class IntentRecognizer:
             "file_management",
             "system_information",
             "browser_task",
+            "email_assistant",
             "unknown",
         ]
 
@@ -117,9 +120,16 @@ class IntentRecognizer:
             }
 
         # 2. Window management
-        # "Minimize Notepad", "Maximize Calculator", "Close Notepad", "Bring Notepad to the front"
+        # "Minimize Notepad", "Maximize Calculator", "Close Notepad", "Switch to Notepad",
+        # "Close the currently active window", "Minimize all windows", "Arrange my open windows"
         if re.search(
-            r"^(?:minimize|maximize|restore|close|focus|bring\s+to\s+(?:the\s+)?front|switch\s+to)\s+(?:notepad|calculator|chrome|vs\s*code|vscode|window)\b",
+            r"^(?:minimize\s+(?:all|every)\s+windows?|(?:arrange|tile|cascade)\s+(?:my\s+)?(?:open\s+)?windows?|"
+            r"close\s+(?:the\s+)?(?:currently\s+)?(?:active|current|this)\s+window|"
+            r"(?:what|which|identify|show|get)\s+(?:is\s+)?(?:the\s+)?(?:currently\s+)?active\s+window|"
+            r"(?:list|show)\s+(?:all\s+)?(?:running|open)\s+(?:applications|apps|windows))\b",
+            lower,
+        ) or re.search(
+            r"^(?:minimize|maximize|restore|close|focus|bring\s+to\s+(?:the\s+)?front|switch\s+to)\s+(?:the\s+)?[a-z0-9._ -]{2,60}\b",
             lower,
         ):
             return {
@@ -143,8 +153,11 @@ class IntentRecognizer:
                 "reason": "User requested listing, searching, or refreshing installed applications.",
             }
 
-        # 4. Filesystem / document management
-        # "Create a text file named notes.txt", "Search for notes.txt", "Open my Downloads folder", "Save the document"
+        # 4. Filesystem / document management & AI File Assistant
+        # "Create a text file named notes.txt", "Create a text file containing these notes...",
+        # "Find my resume", "Summarize this PDF", "What does this document say about...",
+        # "Compare these two documents", "Find files modified recently in Downloads",
+        # "Find all Python files inside my VoxPilot project", "Organize these files into folders"
         if re.search(r"^(?:create|make)\s+(?:a\s+)?(?:new\s+)?(?:text\s+)?file\b", lower):
             return {
                 "intent": "file_management",
@@ -157,11 +170,35 @@ class IntentRecognizer:
                 "confidence": 0.98,
                 "reason": "User requested document saving.",
             }
-        if re.search(r"^(?:search|find|look)\s+for\s+(?:a\s+)?(?:file|document|\S+\.\w+)\b", lower):
+        if re.search(
+            r"^(?:summarize|summarise|read|inspect|analyze|analyse|extract)\s+(?:this\s+|the\s+|my\s+)?(?:pdf|docx?|txt|csv|json|md|markdown|document|file|resume|report|notes)\b",
+            lower,
+        ) or re.search(
+            r"^(?:summarize|summarise|read|inspect)\s+.*\.(?:pdf|docx?|txt|csv|json|md|markdown|py|log)\b",
+            lower,
+        ) or re.search(
+            r"^what\s+does\s+(?:this|the)\s+(?:document|file|pdf|docx?|report|resume|notes)\s+say\b",
+            lower,
+        ) or re.search(
+            r"^compare\s+(?:these\s+(?:two\s+)?(?:documents|files)|.*\.(?:pdf|docx?|txt|csv|json|md|py)\b)",
+            lower,
+        ) or re.search(
+            r"^organize\s+(?:these\s+)?files\b",
+            lower,
+        ):
+            return {
+                "intent": "file_management",
+                "confidence": 0.99,
+                "reason": "User requested AI File Assistant document reading, Q&A, comparison, or organization.",
+            }
+        if re.search(
+            r"^(?:search|find|look|locate)\s+(?:for\s+)?(?:my\s+|all\s+|a\s+)?(?:files?|documents?|folders?|directory|resume|\S+\.\w+|python\s+files?)\b",
+            lower,
+        ):
             return {
                 "intent": "file_management",
                 "confidence": 0.98,
-                "reason": "User requested file search on disk.",
+                "reason": "User requested file or folder search on disk.",
             }
         if re.search(
             r"^(?:list|show)\s+(?:my\s+)?(?:files|directory|folder|downloads|documents|desktop)\b",
@@ -174,6 +211,50 @@ class IntentRecognizer:
                 "intent": "file_management",
                 "confidence": 0.98,
                 "reason": "User requested directory inspection.",
+            }
+
+        # 4d. AI Email Assistant (Phase 4D)
+        if re.search(
+            r"\b(?:emails?|e-mails?|inbox|unread\s+emails?|email\s+thread)\b",
+            lower,
+        ) and any(
+            kw in lower
+            for kw in (
+                "summarize", "summarise", "find", "search", "show", "list",
+                "draft", "write", "reply", "identify", "unread", "attachment",
+                "thread", "check", "read",
+            )
+        ):
+            return {
+                "intent": "email_assistant",
+                "confidence": 0.99,
+                "reason": "User requested AI Email Assistant reading, search, summarization, or drafting.",
+            }
+        if re.search(r"^(?:reply\s+politely\s+that|draft\s+(?:a\s+)?(?:professional\s+)?reply)\b", lower):
+            return {
+                "intent": "email_assistant",
+                "confidence": 0.99,
+                "reason": "User requested drafting an email reply.",
+            }
+
+        # 4c. Browser Research & Webpage Inspection (Phase 4C)
+        if re.search(
+            r"^(?:research|investigate)\b",
+            lower,
+        ) or re.search(
+            r"^(?:open|visit|browse|go\s+to|summarize|summarise|read|inspect)\s+(?:this\s+|the\s+)?(?:website|webpage|web\s+page|article|site|page)\b",
+            lower,
+        ) or re.search(
+            r"^compare\s+(?:the\s+information\s+from\s+these\s+.*?(?:websites|webpages|pages|sites)|.*https?://)",
+            lower,
+        ) or re.search(
+            r"^(?:find|extract|get)\s+.*?\b(?:on\s+this\s+(?:page|website|site)|from\s+these\s+search\s+results|official\s+documentation\s+for)\b",
+            lower,
+        ) or re.search(r"https?://\S+", lower):
+            return {
+                "intent": "browser_task",
+                "confidence": 0.99,
+                "reason": "User requested browser navigation, webpage inspection, or web research.",
             }
 
         # 4b. Universal Application, Windows Settings, System Utility, and Special Folder Launching
@@ -213,15 +294,20 @@ class IntentRecognizer:
                 "reason": "User requested screenshot capture.",
             }
 
-        # 6. General conversation (greetings & informational questions mentioning apps)
+        # 6. General conversation (greetings, informational questions, & explicit user memory statements/recalls)
         if re.search(
-            r"^(?:hello|hi|hey|good\s+morning|good\s+afternoon|good\s+evening|howdy|what\s+can\s+you\s+do|who\s+are\s+you|what\s+is\b|tell\s+me\s+about\b|do\s+you\s+know\b|how\s+do\s+i\s+use\b)",
+            r"^(?:hello|hi|hey|good\s+morning|good\s+afternoon|good\s+evening|howdy|"
+            r"what\s+can\s+you\s+do|who\s+are\s+you|what\s+is\b|tell\s+me\s+about\b|"
+            r"do\s+you\s+(?:know|remember)\b|what\s+do\s+you\s+remember\b|how\s+do\s+i\s+use\b|"
+            r"(?:please\s+)?remember(?:\s+that)?\b|keep\s+in\s+mind\b|"
+            r"i\s+(?:really\s+)?prefer\b|my\s+preferred\b|my\s+favorite\b|my\s+favourite\b|"
+            r"my\s+name\s+is\b|my\s+(?:main\s+|current\s+)?project\s+is\b|always\s+(?:respond|reply|answer|keep)\b)",
             lower,
         ):
             return {
                 "intent": "general_conversation",
                 "confidence": 0.99,
-                "reason": "User greeting or conversational query.",
+                "reason": "User greeting, memory statement, or conversational query.",
             }
 
         return None
@@ -275,17 +361,29 @@ Rules:
 """
 
         try:
-            response = ollama.chat(
-                model=self.model,
-                messages=[
+            from backend.ai.providers.runtime import run_provider_chat
+
+            def _local_intent_call(local_model: str, msgs, temp: float) -> str:
+                model_manager = get_shared_model_manager()
+                target_model = self.model or local_model
+                with model_manager.track_inference(target_model):
+                    response = ollama.chat(
+                        model=target_model,
+                        messages=msgs,
+                        format="json",
+                        options={"temperature": temp},
+                    )
+                return response.message.content
+
+            response_text = run_provider_chat(
+                [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": cleaned_msg},
                 ],
-                format="json",
-                options={"temperature": 0},
+                temperature=0,
+                json_mode=True,
+                local_executor=_local_intent_call,
             )
-
-            response_text = response.message.content
             if not response_text:
                 raise IntentRecognitionError("The AI returned an empty response.")
 

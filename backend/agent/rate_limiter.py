@@ -267,6 +267,16 @@ class RateLimiter:
         with self._lock:
             return execution_id in self._active_executions
 
+    def get_active_execution_count(self) -> int:
+        """Return the number of currently active agent executions."""
+        with self._lock:
+            return len(self._active_executions)
+
+    def get_active_execution_ids(self) -> List[str]:
+        """Return a snapshot list of currently active execution IDs."""
+        with self._lock:
+            return list(self._active_executions.keys())
+
     # --------------------------------------------------------------------------
     # Tool-Call Budgets and Checkpoints
     # --------------------------------------------------------------------------

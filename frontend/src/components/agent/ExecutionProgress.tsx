@@ -92,18 +92,73 @@ export const ExecutionProgress: React.FC<ExecutionProgressProps> = ({
         {getStatusBadge()}
       </div>
 
+      {execution.user_input && (
+        <div className="execution-current-task" data-testid="execution-current-task">
+          <span className="text-muted">Task:</span>{' '}
+          <span>{execution.user_input}</span>
+        </div>
+      )}
+
       {totalSteps > 0 && (
         <div className="execution-steps-summary">
           <div className="step-counter-text">
             <span>
               Step {completedCount} of {totalSteps} completed
             </span>
-            {status === 'executing' && (
+            {(status === 'executing' || status === 'running' || status === 'planning') && (
               <span className="current-action-text">
                 Current action: <code>{currentAction}</code>
               </span>
             )}
           </div>
+        </div>
+      )}
+
+      {showDetails && plan.length > 0 && (
+        <div className="completed-steps-list" data-testid="execution-plan-steps">
+          {plan.map((step, idx) => {
+            const isCompleted = idx < completedCount;
+            const isFailed = failed.some((f) => (f.step_index ?? idx) === idx) || (status === 'failed' && idx === completedCount);
+            const isRunning = !isCompleted && !isFailed && idx === completedCount && (status === 'executing' || status === 'running');
+            const isCancelled = status === 'cancelled' && !isCompleted;
+            return (
+              <div
+                key={idx}
+                className={`step-item ${isCompleted ? 'completed' : isFailed ? 'failed' : isRunning ? 'running' : ''}`}
+              >
+                {isCompleted ? (
+                  <CheckCircle2 size={13} style={{ color: 'var(--status-success)' }} />
+                ) : isFailed ? (
+                  <XCircle size={13} style={{ color: 'var(--status-danger)' }} />
+                ) : isRunning ? (
+                  <Loader2 size={13} className="animate-spin" />
+                ) : isCancelled ? (
+                  <ZapOff size={13} style={{ color: 'var(--status-inactive)' }} />
+                ) : (
+                  <Clock size={13} className="text-muted" />
+                )}
+                <span>Step {idx + 1}:</span>
+                <code>{step.action || 'tool'}</code>
+                {step.description && <span className="text-muted">— {step.description}</span>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {status === 'confirmation_required' && execution.pending_confirmation && (
+        <div className="execution-error-banner" style={{ borderColor: 'var(--status-warning)', color: 'var(--status-warning)' }}>
+          <AlertTriangle size={14} />
+          <span>
+            Confirmation required for <code>{execution.pending_confirmation.action}</code>. Review in Confirmations.
+          </span>
+        </div>
+      )}
+
+      {status === 'cancelled' && (
+        <div className="execution-error-banner">
+          <ZapOff size={14} />
+          <span>Execution cancelled safely.</span>
         </div>
       )}
 

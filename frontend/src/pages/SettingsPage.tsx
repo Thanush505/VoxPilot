@@ -36,12 +36,24 @@ import {
   formatKeyboardEventToShortcut,
   validateShortcutClientSide,
 } from '../utils/shortcutUtils';
+import MemoryManagementCard from '../components/settings/MemoryManagementCard';
+import PersonalizationCard from '../components/settings/PersonalizationCard';
+import ProfileManagementCard from '../components/settings/ProfileManagementCard';
+import ThemeSettingsCard from '../components/settings/ThemeSettingsCard';
+import EmailSettingsSection from '../components/settings/EmailSettingsSection';
+import StartupSettingsCard from '../components/settings/StartupSettingsCard';
+import NotificationSettingsCard from '../components/settings/NotificationSettingsCard';
+import ProviderSettingsCard from '../components/settings/ProviderSettingsCard';
 
 interface SettingsPageProps {
   isBackendConnected: boolean;
+  onProfileChanged?: () => void;
 }
 
-export const SettingsPage: React.FC<SettingsPageProps> = ({ isBackendConnected }) => {
+export const SettingsPage: React.FC<SettingsPageProps> = ({
+  isBackendConnected,
+  onProfileChanged,
+}) => {
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatusResponse | null>(null);
   const [microphones, setMicrophones] = useState<MicrophoneDevice[]>([]);
   const [voices, setVoices] = useState<PiperVoiceModel[]>([]);
@@ -1182,14 +1194,14 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isBackendConnected }
                 )}
                 {(updateStatus.last_install_result.session_log ||
                   updateStatus.last_install_result.installer_log) && (
-                  <div style={{ wordBreak: 'break-all' }}>
-                    <strong>Diagnostic Logs:</strong>{' '}
-                    <code>
-                      {updateStatus.last_install_result.session_log ||
-                        updateStatus.last_install_result.installer_log}
-                    </code>
-                  </div>
-                )}
+                    <div style={{ wordBreak: 'break-all' }}>
+                      <strong>Diagnostic Logs:</strong>{' '}
+                      <code>
+                        {updateStatus.last_install_result.session_log ||
+                          updateStatus.last_install_result.installer_log}
+                      </code>
+                    </div>
+                  )}
                 {updateStatus.last_install_result.recovery_hint && (
                   <div style={{ marginTop: '6px', color: '#f59e0b' }}>
                     <strong>Recovery Guidance:</strong>{' '}
@@ -1266,6 +1278,25 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isBackendConnected }
           </div>
         </div>
       </div>
+
+      <ThemeSettingsCard />
+
+      <ProfileManagementCard
+        isBackendConnected={isBackendConnected}
+        onProfileChanged={onProfileChanged}
+      />
+
+      <PersonalizationCard isBackendConnected={isBackendConnected} />
+
+      <MemoryManagementCard isBackendConnected={isBackendConnected} />
+
+      <EmailSettingsSection />
+
+      <StartupSettingsCard isBackendConnected={isBackendConnected} />
+
+      <NotificationSettingsCard isBackendConnected={isBackendConnected} />
+
+      <ProviderSettingsCard isBackendConnected={isBackendConnected} />
 
       {showSettingsConfirmInstall && updateStatus && (
         <div

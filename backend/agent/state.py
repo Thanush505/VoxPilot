@@ -79,10 +79,18 @@ class VoxPilotState(TypedDict, total=False):
     pending_confirmation: Optional[Dict[str, Any]]
     execution_id: str
     conversation_id: str
+    profile_id: str
     conversation_history: Optional[str]
+    conversation_turns_text: Optional[str]
+    retrieved_memories: List[Dict[str, Any]]
+    extracted_memories: List[Dict[str, Any]]
+    personalization_context: Optional[str]
+    active_preferences: List[Dict[str, Any]]
     replan_count: int
     max_replans: int
     needs_replan: bool
     replan_reason: Optional[str]
     replan_history: List[Dict[str, Any]]
     started_at: Optional[float]
+    capture_id: Optional[str]
+    screen_analysis_used: bool

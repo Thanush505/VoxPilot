@@ -41,6 +41,12 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
             Real-time status overview, backend telemetry, safety latches, and automation state.
           </p>
         </div>
+        <div className="page-header-actions">
+          <span className={`health-pill ${isConnected ? 'connected' : 'disconnected'}`}>
+            <span className="status-dot" />
+            <span>{isConnected ? 'System Operational' : 'Backend Offline'}</span>
+          </span>
+        </div>
       </div>
 
       {/* Prominent Global Emergency Stop Safety Control */}
@@ -113,8 +119,8 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
         onRefresh={onRefresh}
       />
 
-      {/* System Overview (Clear Unavailable State) */}
-      <SystemOverview />
+      {/* System Overview (Live Host Hardware & Ollama Runtime) */}
+      <SystemOverview isBackendConnected={isConnected} />
 
       {/* Recent Activity Section (Empty or Real Data) */}
       <RecentActivity isBackendConnected={isConnected} />

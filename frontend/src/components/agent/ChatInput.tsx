@@ -1,6 +1,19 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Loader2, Mic, MicOff, Square, Volume2, AlertCircle, Radio } from 'lucide-react';
-import { VoicePhase } from '../../api/types';
+import {
+  Send,
+  Loader2,
+  Mic,
+  MicOff,
+  Square,
+  Volume2,
+  VolumeX,
+  AlertCircle,
+  Radio,
+  Monitor,
+  ShieldCheck,
+  X,
+} from 'lucide-react';
+import { ScreenCaptureResponse, VoicePhase } from '../../api/types';
 
 interface ChatInputProps {
   onSendMessage: (text: string) => void;
@@ -10,11 +23,25 @@ interface ChatInputProps {
   isVoiceActive?: boolean;
   voicePhase?: VoicePhase;
   isRecording?: boolean;
+  isPttActive?: boolean;
+  wakeWordEnabled?: boolean;
   voiceShortcut?: string;
   voiceError?: string | null;
   lastTranscript?: string | null;
   onToggleVoice?: () => void;
   onCancelVoice?: () => void;
+  onStartPtt?: () => void;
+  onStopPtt?: () => void;
+  onInterruptVoice?: () => void;
+  onToggleWakeWord?: () => void;
+  capturedScreen?: ScreenCaptureResponse | null;
+  isCapturingScreen?: boolean;
+  showCaptureConfirm?: boolean;
+  captureError?: string | null;
+  onRequestScreenCapture?: () => void;
+  onConfirmScreenCapture?: () => void;
+  onCancelScreenCapture?: () => void;
+  onRemoveScreenCapture?: () => void;
 }
 
 const VOICE_PHASE_LABELS: Record<VoicePhase, string> = {
@@ -23,6 +50,7 @@ const VOICE_PHASE_LABELS: Record<VoicePhase, string> = {
   transcribing: 'Transcribing speech (Faster-Whisper)...',
   processing: 'Processing command with VoxPilot Agent...',
   speaking: 'Speaking response (Piper TTS)...',
+  interrupted: 'Voice Interaction Interrupted',
   error: 'Voice Mode Error',
 };
 
@@ -34,11 +62,25 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   isVoiceActive = false,
   voicePhase = 'idle',
   isRecording = false,
+  isPttActive = false,
+  wakeWordEnabled = false,
   voiceShortcut = 'Ctrl+Shift+V',
   voiceError = null,
   lastTranscript = null,
   onToggleVoice,
   onCancelVoice,
+  onStartPtt,
+  onStopPtt,
+  onInterruptVoice,
+  onToggleWakeWord,
+  capturedScreen = null,
+  isCapturingScreen = false,
+  showCaptureConfirm = false,
+  captureError = null,
+  onRequestScreenCapture,
+  onConfirmScreenCapture,
+  onCancelScreenCapture,
+  onRemoveScreenCapture,
 }) => {
   const [text, setText] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -103,6 +145,14 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             <div className="voice-status-text-group">
               <span className="voice-phase-badge">
                 {VOICE_PHASE_LABELS[voiceError ? 'error' : voicePhase]}
+                {(voicePhase === 'listening' || voicePhase === 'speaking') && !voiceError && (
+                  <span className="voice-wave-bars" aria-hidden="true">
+                    <span />
+                    <span />
+                    <span />
+                    <span />
+                  </span>
+                )}
               </span>
               {voiceError ? (
                 <span className="voice-error-text">{voiceError}</span>
@@ -118,6 +168,19 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             <span className="voice-shortcut-pill" title="Global Windows Toggle Shortcut">
               {voiceShortcut}
             </span>
+            {voicePhase === 'speaking' && onInterruptVoice && (
+              <button
+                type="button"
+                className="voice-cancel-button"
+                onClick={onInterruptVoice}
+                data-testid="stop-speaking-btn"
+                title="Interrupt speech playback immediately"
+                aria-label="Stop Speaking"
+              >
+                <VolumeX size={12} />
+                <span>Stop Speaking</span>
+              </button>
+            )}
             {isVoiceActive && onCancelVoice && (
               <button
                 type="button"
@@ -134,6 +197,96 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         </div>
       )}
 
+      {showCaptureConfirm && (
+        <div
+          className="screen-capture-confirm-bar"
+          data-testid="screen-capture-confirm-bar"
+          role="region"
+          aria-label="Screen capture privacy confirmation"
+        >
+          <div className="screen-capture-confirm-text">
+            <ShieldCheck size={15} className="text-accent-blue" />
+            <span>
+              Capture primary display once? Stays local, never saved to permanent memory, and cleared after use.
+            </span>
+          </div>
+          <div className="screen-capture-confirm-actions">
+            <button
+              type="button"
+              className="primary-cta-btn"
+              style={{ padding: '5px 12px', fontSize: '12px' }}
+              data-testid="confirm-screen-capture-btn"
+              onClick={onConfirmScreenCapture}
+              disabled={isCapturingScreen}
+            >
+              {isCapturingScreen ? 'Capturing...' : 'Capture Now'}
+            </button>
+            <button
+              type="button"
+              className="refresh-btn"
+              style={{ padding: '5px 10px', fontSize: '12px' }}
+              onClick={onCancelScreenCapture}
+              disabled={isCapturingScreen}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {captureError && (
+        <div className="panel-error-alert" style={{ marginBottom: '8px' }} role="alert">
+          <AlertCircle size={15} />
+          <span>{captureError}</span>
+        </div>
+      )}
+
+      {capturedScreen && (
+        <div
+          className="screen-preview-card"
+          data-testid="screen-preview-card"
+          role="region"
+          aria-label="Captured screen preview"
+        >
+          {capturedScreen.preview_data_url && (
+            <img
+              src={capturedScreen.preview_data_url}
+              alt="Captured primary screen preview"
+              className="screen-preview-thumb"
+            />
+          )}
+          <div className="screen-preview-meta">
+            <div className="screen-preview-title-row">
+              <span className="screen-preview-title">
+                Primary Display Attached ({capturedScreen.width}x{capturedScreen.height})
+              </span>
+              <span className="status-pill inactive">
+                {Math.max(1, Math.round(capturedScreen.size_bytes / 1024))} KB &bull; Ephemeral
+              </span>
+            </div>
+            <div className="screen-preview-vision-note">
+              {capturedScreen.vision_status?.vision_available
+                ? `Local Vision Ready (${capturedScreen.vision_status.active_vision_model})`
+                : 'No local vision model installed (qwen3:4b is text-only). Send a question for local status & model options.'}
+            </div>
+          </div>
+          {onRemoveScreenCapture && (
+            <button
+              type="button"
+              className="refresh-btn screen-preview-remove-btn"
+              data-testid="remove-screen-capture-btn"
+              aria-label="Remove captured screenshot"
+              title="Remove screenshot"
+              onClick={onRemoveScreenCapture}
+              disabled={isLoading}
+            >
+              <X size={14} />
+              <span>Remove</span>
+            </button>
+          )}
+        </div>
+      )}
+
       <div className={`chat-input-wrapper ${isVoiceActive ? 'voice-active-border' : ''}`}>
         <textarea
           ref={textareaRef}
@@ -141,14 +294,72 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           onChange={handleChange}
           onKeyDown={handleKeyDown}
           placeholder={
-            isVoiceActive
-              ? `Voice Mode Active (${VOICE_PHASE_LABELS[voicePhase]}) — or type a command...`
-              : placeholder
+            capturedScreen
+              ? 'Ask about what is on your screen (e.g., "Explain this error" or "Summarize this page")...'
+              : isVoiceActive
+                ? `Voice Mode Active (${VOICE_PHASE_LABELS[voicePhase]}) — or type a command...`
+                : placeholder
           }
           disabled={disabled || isLoading}
           rows={1}
           className="chat-textarea"
         />
+
+        {onRequestScreenCapture && (
+          <button
+            type="button"
+            onClick={onRequestScreenCapture}
+            disabled={disabled || isLoading || isCapturingScreen}
+            className={`chat-screen-button ${capturedScreen ? 'attached' : ''}`}
+            data-testid="capture-screen-btn"
+            aria-label="Capture primary screen"
+            title="Capture primary screen on demand"
+          >
+            {isCapturingScreen ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              <Monitor size={16} />
+            )}
+          </button>
+        )}
+
+        {onToggleWakeWord && (
+          <button
+            type="button"
+            onClick={onToggleWakeWord}
+            disabled={disabled}
+            className={`chat-screen-button ${wakeWordEnabled ? 'attached' : ''}`}
+            data-testid="wake-word-toggle-btn"
+            aria-label={wakeWordEnabled ? 'Disable Wake Word' : 'Enable Wake Word'}
+            aria-pressed={wakeWordEnabled}
+            title={
+              wakeWordEnabled
+                ? 'Wake-word listener active ("Hey Jarvis") — click to disable'
+                : 'Enable local wake-word listener ("Hey Jarvis")'
+            }
+          >
+            <Radio size={16} />
+          </button>
+        )}
+
+        {onStartPtt && onStopPtt && (
+          <button
+            type="button"
+            onPointerDown={onStartPtt}
+            onPointerUp={onStopPtt}
+            onPointerCancel={onStopPtt}
+            onPointerLeave={() => {
+              if (isPttActive) onStopPtt();
+            }}
+            disabled={disabled}
+            className={`chat-mic-button ${isPttActive ? 'active recording' : ''}`}
+            data-testid="ptt-button"
+            aria-label="Hold to Talk (Push-to-Talk)"
+            title="Hold to Talk (release to send speech)"
+          >
+            <Volume2 size={16} />
+          </button>
+        )}
 
         {onToggleVoice && (
           <button

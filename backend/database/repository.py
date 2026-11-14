@@ -17,9 +17,10 @@ from backend.database.models import (
     ConversationRecord,
     ExecutionRecord,
     ExecutionStepRecord,
+    MemoryRecord,
     serialize_sanitized_json,
 )
-from backend.database.connection import get_sessionmaker, get_sync_engine
+from backend.database.connection import get_sessionmaker, get_sync_engine, run_migrations_sync
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ class DatabaseRepository:
         self._sync_engine = sync_engine or get_sync_engine()
         self._session_maker = session_maker or get_sessionmaker()
         try:
-            SQLModel.metadata.create_all(self._sync_engine)
+            run_migrations_sync(self._sync_engine)
         except Exception as err:
             logger.debug(f"Schema auto-initialization skipped: {err}")
 
@@ -44,8 +45,10 @@ class DatabaseRepository:
         conversation_id: str,
         title: Optional[str] = None,
         summary: Optional[str] = None,
+        profile_id: str = "default",
     ) -> ConversationRecord:
         """Retrieve existing conversation or create a new isolated conversation record."""
+        clean_profile = (profile_id or "default").strip() or "default"
         async with self._session_maker() as session:
             stmt = select(ConversationRecord).where(ConversationRecord.conversation_id == conversation_id)
             result = await session.exec(stmt)
@@ -55,6 +58,7 @@ class DatabaseRepository:
             if conversation is None:
                 conversation = ConversationRecord(
                     conversation_id=conversation_id,
+                    profile_id=clean_profile,
                     title=title or f"Conversation {conversation_id[:8]}",
                     summary=summary,
                     created_at=now,
@@ -65,6 +69,10 @@ class DatabaseRepository:
                 await session.refresh(conversation)
                 logger.debug(f"Created conversation record: {conversation_id}")
             else:
+                if (conversation.profile_id or "default") != clean_profile:
+                    raise ValueError(
+                        f"Conversation '{conversation_id}' belongs to another profile."
+                    )
                 if title:
                     conversation.title = title
                 if summary:
@@ -76,21 +84,32 @@ class DatabaseRepository:
 
             return conversation
 
-    async def get_conversation(self, conversation_id: str) -> Optional[ConversationRecord]:
-        """Fetch conversation record by id."""
+    async def get_conversation(
+        self,
+        conversation_id: str,
+        profile_id: Optional[str] = None,
+    ) -> Optional[ConversationRecord]:
+        """Fetch conversation record by id, optionally enforcing profile ownership."""
         async with self._session_maker() as session:
             stmt = select(ConversationRecord).where(ConversationRecord.conversation_id == conversation_id)
+            if profile_id is not None:
+                stmt = stmt.where(ConversationRecord.profile_id == ((profile_id or "default").strip() or "default"))
             result = await session.exec(stmt)
             return result.first()
 
     async def list_conversations(
-        self, limit: int = 50, offset: int = 0
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        profile_id: Optional[str] = None,
     ) -> List[ConversationRecord]:
-        """List conversations ordered by most recently updated."""
+        """List conversations ordered by most recently updated, optionally filtered by profile."""
         async with self._session_maker() as session:
+            stmt = select(ConversationRecord)
+            if profile_id is not None:
+                stmt = stmt.where(ConversationRecord.profile_id == ((profile_id or "default").strip() or "default"))
             stmt = (
-                select(ConversationRecord)
-                .order_by(ConversationRecord.updated_at.desc())
+                stmt.order_by(ConversationRecord.updated_at.desc())
                 .offset(offset)
                 .limit(limit)
             )
@@ -113,8 +132,10 @@ class DatabaseRepository:
         if not conv_id:
             conv_id = f"conv_{exec_id}"
 
-        # Ensure conversation exists
-        await self.create_or_get_conversation(conv_id)
+        clean_profile = (state.get("profile_id") or "default").strip() or "default"
+
+        # Ensure conversation exists under the active profile
+        await self.create_or_get_conversation(conv_id, profile_id=clean_profile)
 
         user_input = state.get("user_input", "")
         intent = state.get("intent")
@@ -139,6 +160,7 @@ class DatabaseRepository:
                 record = ExecutionRecord(
                     execution_id=exec_id,
                     conversation_id=conv_id,
+                    profile_id=clean_profile,
                     user_input=user_input,
                     intent=intent,
                     execution_status=status,
@@ -193,26 +215,33 @@ class DatabaseRepository:
         logger.debug(f"Saved execution record: {exec_id} (status: {status})")
         return record
 
-    async def get_execution(self, execution_id: str) -> Optional[ExecutionRecord]:
-        """Fetch execution record by ID."""
+    async def get_execution(
+        self,
+        execution_id: str,
+        profile_id: Optional[str] = None,
+    ) -> Optional[ExecutionRecord]:
+        """Fetch execution record by ID, optionally enforcing profile ownership."""
         async with self._session_maker() as session:
             stmt = select(ExecutionRecord).where(ExecutionRecord.execution_id == execution_id)
+            if profile_id is not None:
+                stmt = stmt.where(ExecutionRecord.profile_id == ((profile_id or "default").strip() or "default"))
             result = await session.exec(stmt)
             return result.first()
 
     async def list_executions_for_conversation(
-        self, conversation_id: str, limit: int = 50
+        self,
+        conversation_id: str,
+        limit: int = 50,
+        profile_id: Optional[str] = None,
     ) -> List[ExecutionRecord]:
         """List all execution records belonging to a conversation ordered chronologically."""
         async with self._session_maker() as session:
-            stmt = (
-                select(ExecutionRecord)
-                .where(ExecutionRecord.conversation_id == conversation_id)
-                .order_by(ExecutionRecord.created_at.asc())
-                .limit(limit)
-            )
+            stmt = select(ExecutionRecord).where(ExecutionRecord.conversation_id == conversation_id)
+            if profile_id is not None:
+                stmt = stmt.where(ExecutionRecord.profile_id == ((profile_id or "default").strip() or "default"))
+            stmt = stmt.order_by(ExecutionRecord.created_at.desc()).limit(limit)
             result = await session.exec(stmt)
-            return list(result.all())
+            return list(reversed(list(result.all())))
 
     # ==========================================================================
     # Execution Step Operations
@@ -285,8 +314,10 @@ class DatabaseRepository:
         conversation_id: str,
         title: Optional[str] = None,
         summary: Optional[str] = None,
+        profile_id: str = "default",
     ) -> ConversationRecord:
         """Synchronously create or fetch conversation record."""
+        clean_profile = (profile_id or "default").strip() or "default"
         with Session(self._sync_engine) as session:
             stmt = select(ConversationRecord).where(ConversationRecord.conversation_id == conversation_id)
             conversation = session.exec(stmt).first()
@@ -294,6 +325,7 @@ class DatabaseRepository:
             if conversation is None:
                 conversation = ConversationRecord(
                     conversation_id=conversation_id,
+                    profile_id=clean_profile,
                     title=title or f"Conversation {conversation_id[:8]}",
                     summary=summary,
                     created_at=now,
@@ -303,6 +335,10 @@ class DatabaseRepository:
                 session.commit()
                 session.refresh(conversation)
             else:
+                if (conversation.profile_id or "default") != clean_profile:
+                    raise ValueError(
+                        f"Conversation '{conversation_id}' belongs to another profile."
+                    )
                 if title:
                     conversation.title = title
                 if summary:
@@ -317,8 +353,9 @@ class DatabaseRepository:
         """Synchronously persist execution record and step results."""
         exec_id = state.get("execution_id") or f"exec_{uuid.uuid4().hex[:12]}"
         conv_id = state.get("conversation_id") or f"conv_{exec_id}"
+        clean_profile = (state.get("profile_id") or "default").strip() or "default"
 
-        self.create_or_get_conversation_sync(conv_id)
+        self.create_or_get_conversation_sync(conv_id, profile_id=clean_profile)
 
         user_input = state.get("user_input", "")
         intent = state.get("intent")
@@ -340,6 +377,7 @@ class DatabaseRepository:
                 record = ExecutionRecord(
                     execution_id=exec_id,
                     conversation_id=conv_id,
+                    profile_id=clean_profile,
                     user_input=user_input,
                     intent=intent,
                     execution_status=status,
@@ -435,14 +473,74 @@ class DatabaseRepository:
             session.refresh(step_record)
         return step_record
 
-    def get_execution_sync(self, execution_id: str) -> Optional[ExecutionRecord]:
-        """Synchronously retrieve execution record by ID."""
+    def get_execution_sync(
+        self,
+        execution_id: str,
+        profile_id: Optional[str] = None,
+    ) -> Optional[ExecutionRecord]:
+        """Synchronously retrieve execution record by ID, optionally enforcing profile ownership."""
         with Session(self._sync_engine) as session:
             stmt = select(ExecutionRecord).where(ExecutionRecord.execution_id == execution_id)
+            if profile_id is not None:
+                stmt = stmt.where(ExecutionRecord.profile_id == ((profile_id or "default").strip() or "default"))
             return session.exec(stmt).first()
 
-    def get_conversation_sync(self, conversation_id: str) -> Optional[ConversationRecord]:
-        """Synchronously retrieve conversation record by ID."""
+    def get_conversation_sync(
+        self,
+        conversation_id: str,
+        profile_id: Optional[str] = None,
+    ) -> Optional[ConversationRecord]:
+        """Synchronously retrieve conversation record by ID, optionally enforcing profile ownership."""
         with Session(self._sync_engine) as session:
             stmt = select(ConversationRecord).where(ConversationRecord.conversation_id == conversation_id)
+            if profile_id is not None:
+                stmt = stmt.where(ConversationRecord.profile_id == ((profile_id or "default").strip() or "default"))
             return session.exec(stmt).first()
+
+    def list_executions_for_conversation_sync(
+        self,
+        conversation_id: str,
+        limit: int = 20,
+        profile_id: Optional[str] = None,
+    ) -> List[ExecutionRecord]:
+        """Synchronously list execution records belonging to a conversation chronologically."""
+        with Session(self._sync_engine) as session:
+            stmt = select(ExecutionRecord).where(ExecutionRecord.conversation_id == conversation_id)
+            if profile_id is not None:
+                stmt = stmt.where(ExecutionRecord.profile_id == ((profile_id or "default").strip() or "default"))
+            stmt = stmt.order_by(ExecutionRecord.created_at.desc()).limit(limit)
+            return list(reversed(list(session.exec(stmt).all())))
+
+    def save_conversation_context_sync(
+        self,
+        conversation_id: str,
+        context_data: Dict[str, Any],
+        profile_id: str = "default",
+    ) -> ConversationRecord:
+        """Synchronously sanitize and persist active conversation context JSON."""
+        clean_profile = (profile_id or "default").strip() or "default"
+        sanitized_json = serialize_sanitized_json(context_data)
+        now = datetime.now(timezone.utc)
+        with Session(self._sync_engine) as session:
+            stmt = select(ConversationRecord).where(ConversationRecord.conversation_id == conversation_id)
+            conversation = session.exec(stmt).first()
+            if conversation is None:
+                conversation = ConversationRecord(
+                    conversation_id=conversation_id,
+                    profile_id=clean_profile,
+                    title=f"Conversation {conversation_id[:8]}",
+                    active_context_json=sanitized_json,
+                    created_at=now,
+                    updated_at=now,
+                )
+            else:
+                if (conversation.profile_id or "default") != clean_profile:
+                    raise ValueError(
+                        f"Conversation '{conversation_id}' belongs to another profile."
+                    )
+                conversation.active_context_json = sanitized_json
+                conversation.updated_at = now
+            session.add(conversation)
+            session.commit()
+            session.refresh(conversation)
+            return conversation

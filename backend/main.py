@@ -11,7 +11,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from backend.api.agent import router as agent_router
+from backend.api.memory import api_memory_router, agent_memory_router
+from backend.api.personalization import api_personalization_router, agent_personalization_router
+from backend.api.profiles import api_profiles_router, agent_profiles_router
+from backend.api.screen import api_screen_router, agent_screen_router
+from backend.api.system import api_system_router, agent_system_router
 from backend.api.updates import api_updates_router, agent_updates_router
+from backend.api.email import api_email_router
+from backend.api.automations import api_automations_router, agent_automations_router
+from backend.api.providers import api_providers_router, agent_providers_router
+from backend.ai.vision import get_shared_screen_capture_service
+from backend.automation.custom_automations import get_shared_custom_automation_service
 from backend.database.connection import init_db, close_db
 from backend.automation.emergency_stop import (
     start_global_hotkey_listener,
@@ -33,10 +43,15 @@ async def lifespan(app: FastAPI):
     voice_service = get_shared_voice_service()
     if os.environ.get("VOXPILOT_ENABLE_HOTKEY", "1") != "0":
         voice_service.start_hotkey_listener()
+    automation_service = get_shared_custom_automation_service()
+    if os.environ.get("VOXPILOT_ENABLE_SCHEDULER", "1") != "0":
+        automation_service.start_scheduler()
     yield
-    # Shutdown: stop voice mode & hotkeys and cleanly close database engines
+    # Shutdown: stop scheduler, voice mode & hotkeys, clear ephemeral screen captures, and close DB
+    automation_service.stop_scheduler()
     voice_service.shutdown()
     stop_global_hotkey_listener()
+    get_shared_screen_capture_service().clear_all_captures()
     await close_db()
 
 
@@ -59,15 +74,30 @@ app.add_middleware(
         "http://127.0.0.1:8000",
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS", "DELETE"],
+    allow_methods=["GET", "POST", "PATCH", "OPTIONS", "DELETE"],
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
 )
 
 # Include API routers
 app.include_router(agent_router)
+app.include_router(api_memory_router)
+app.include_router(agent_memory_router)
+app.include_router(api_personalization_router)
+app.include_router(agent_personalization_router)
+app.include_router(api_profiles_router)
+app.include_router(agent_profiles_router)
+app.include_router(api_screen_router)
+app.include_router(agent_screen_router)
+app.include_router(api_system_router)
+app.include_router(agent_system_router)
 app.include_router(api_updates_router)
 app.include_router(agent_updates_router)
+app.include_router(api_email_router)
+app.include_router(api_automations_router)
+app.include_router(agent_automations_router)
+app.include_router(api_providers_router)
+app.include_router(agent_providers_router)
 
 # Mount frontend static assets if available
 _frontend_dist = get_frontend_dist_dir()

@@ -423,6 +423,8 @@ class FileManager:
         extension: Optional[str] = None,
         max_depth: int = DEFAULT_SEARCH_DEPTH,
         max_results: int = DEFAULT_SEARCH_RESULTS,
+        modified_within_days: Optional[int] = None,
+        sort_by: str = "name",
     ) -> List[FileInfo]:
         """Search for files in an approved directory by name pattern and/or extension.
 
@@ -432,6 +434,8 @@ class FileManager:
             extension: File extension filter (e.g. '.txt', 'pdf').
             max_depth: Maximum directory recursion depth (1 to 10).
             max_results: Maximum results to return (1 to 200).
+            modified_within_days: Optional filter for files modified within N days.
+            sort_by: Sort order ('name' or 'modified').
 
         Returns:
             List[FileInfo]: Matching files and folders up to max_results.
@@ -447,6 +451,10 @@ class FileManager:
         norm_ext = extension.strip().lower() if extension else None
         if norm_ext and not norm_ext.startswith("."):
             norm_ext = f".{norm_ext}"
+
+        cutoff_ts: Optional[float] = None
+        if modified_within_days is not None and modified_within_days >= 0:
+            cutoff_ts = datetime.now(timezone.utc).timestamp() - (modified_within_days * 86400)
 
         matches: List[FileInfo] = []
         base_depth = len(validated_dir.parts)
@@ -478,9 +486,13 @@ class FileManager:
                             f"File search item limit reached ({total_scanned}/{MAX_SEARCH_SCANNED_ITEMS} items scanned). "
                             "Terminating search early."
                         )
+                        if sort_by == "modified":
+                            matches.sort(key=lambda item: item.modified_at, reverse=True)
                         return matches
 
                     if len(matches) >= results_limit:
+                        if sort_by == "modified":
+                            matches.sort(key=lambda item: item.modified_at, reverse=True)
                         return matches
 
                     # Name filter
@@ -496,8 +508,13 @@ class FileManager:
                     try:
                         # Validate path to ensure no containment violation
                         self.validate_path(file_path, must_exist=True)
-                        matches.append(self._get_item_info(file_path))
-                    except (PathNotAllowedError, PathTraversalError, OSError):
+                        info = self._get_item_info(file_path)
+                        if cutoff_ts is not None:
+                            item_ts = datetime.fromisoformat(info.modified_at).timestamp()
+                            if item_ts < cutoff_ts:
+                                continue
+                        matches.append(info)
+                    except (PathNotAllowedError, PathTraversalError, ValueError, OSError):
                         continue
 
         except PermissionError as err:
@@ -505,6 +522,8 @@ class FileManager:
         except OSError as err:
             logger.warning(f"OS error during search in '{validated_dir}': {err}")
 
+        if sort_by == "modified":
+            matches.sort(key=lambda item: item.modified_at, reverse=True)
         return matches
 
     # --------------------------------------------------------------------------
@@ -555,19 +574,22 @@ class FileManager:
         self,
         file_path: Union[str, Path],
         confirm_overwrite: bool = False,
+        content: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Create a new empty file in an approved directory.
+        """Create a new file in an approved directory, optionally with initial text content.
 
         Args:
             file_path: Path of the file to create.
             confirm_overwrite: Must be True to overwrite if file already exists.
+            content: Optional UTF-8 text content to write into the file.
 
         Returns:
             Dict[str, Any]: Execution result.
         """
         validated_path = self.validate_path(file_path, must_exist=False, check_parent_if_new=True)
+        already_exists = validated_path.exists()
 
-        if validated_path.exists():
+        if already_exists:
             if not confirm_overwrite:
                 raise ConfirmationRequiredError(
                     f"File '{validated_path.name}' already exists. Overwrite requires explicit confirmation.",
@@ -578,14 +600,18 @@ class FileManager:
                 raise InvalidOperationError(f"Cannot overwrite directory with a file: {validated_path}")
 
         try:
-            # Create / touch empty file
-            validated_path.touch(exist_ok=True)
-            logger.info(f"Created empty file: {validated_path}")
+            if content is not None and content != "":
+                validated_path.write_text(content, encoding="utf-8")
+                logger.info(f"Created file with content ({len(content)} chars): {validated_path}")
+            else:
+                validated_path.touch(exist_ok=True)
+                logger.info(f"Created empty file: {validated_path}")
             return {
                 "success": True,
                 "operation": "create_file",
                 "path": str(validated_path),
-                "overwritten": validated_path.exists(),
+                "overwritten": already_exists,
+                "bytes_written": len(content.encode("utf-8")) if content else 0,
                 "status": "success",
             }
         except PermissionError as err:
