@@ -87,10 +87,84 @@ class AudioRecorder:
         self.start_timeout_seconds = start_timeout_seconds
         self._cancel_event = threading.Event()
         self.is_recording = False
+        self._telemetry_lock = threading.Lock()
+        self.current_rms: float = 0.0
+        self.current_peak: float = 0.0
+        self.current_bands: list[float] = [0.0] * 16
+        self.current_is_speech: bool = False
+
+    def reset_live_telemetry(self) -> None:
+        """Reset live audio telemetry back to calm idle baselines."""
+        with self._telemetry_lock:
+            self.current_rms = 0.0
+            self.current_peak = 0.0
+            self.current_bands = [0.0] * 16
+            self.current_is_speech = False
+
+    @staticmethod
+    def compute_audio_telemetry(samples: np.ndarray, band_count: int = 16) -> tuple[float, float, list[float]]:
+        """Compute genuine RMS, peak, and log-spaced FFT magnitude bands (0.0..1.0) from PCM samples."""
+        if samples is None:
+            return 0.0, 0.0, [0.0] * band_count
+        arr = np.asarray(samples, dtype=np.float32).reshape(-1)
+        if arr.size == 0:
+            return 0.0, 0.0, [0.0] * band_count
+
+        rms = float(np.sqrt(np.mean(np.square(arr))))
+        peak = float(np.max(np.abs(arr)))
+
+        if arr.size < 32:
+            scaled = max(0.0, min(1.0, rms * 6.0))
+            return rms, peak, [round(scaled, 4)] * band_count
+
+        # Fast Hann-windowed real FFT on up to 512 samples
+        window_slice = arr[-512:] if arr.size > 512 else arr
+        window = np.hanning(window_slice.size).astype(np.float32)
+        spectrum = np.abs(np.fft.rfft(window_slice * window))
+        if spectrum.size <= 2:
+            scaled = max(0.0, min(1.0, rms * 6.0))
+            return rms, peak, [round(scaled, 4)] * band_count
+
+        # Drop DC bin and group into log-spaced frequency bands
+        bins = spectrum[1:]
+        n_bins = bins.size
+        edges = np.unique(np.round(np.geomspace(1, n_bins + 1, num=band_count + 1)).astype(int) - 1)
+        bands: list[float] = []
+        norm_factor = float(window_slice.size) * 0.25 + 1e-6
+        for i in range(band_count):
+            start = int(edges[i]) if i < len(edges) else max(0, n_bins - 1)
+            end = int(edges[i + 1]) if (i + 1) < len(edges) else n_bins
+            if end <= start:
+                end = min(n_bins, start + 1)
+            val = float(np.mean(bins[start:end])) / norm_factor if start < n_bins else 0.0
+            # Gentle perceptual compression so conversational speech sits cleanly in 0.15..0.95
+            compressed = math.sqrt(max(0.0, min(1.0, val)))
+            bands.append(round(compressed, 4))
+        return rms, peak, bands
+
+    def update_live_telemetry(self, chunk: np.ndarray, is_speech: bool = False) -> None:
+        """Update live telemetry safely from an active microphone capture frame."""
+        rms, peak, bands = self.compute_audio_telemetry(chunk, band_count=16)
+        with self._telemetry_lock:
+            self.current_rms = rms
+            self.current_peak = peak
+            self.current_bands = bands
+            self.current_is_speech = bool(is_speech)
+
+    def get_live_telemetry(self) -> dict:
+        """Return a thread-safe snapshot of current audio telemetry."""
+        with self._telemetry_lock:
+            return {
+                "rms_level": round(float(self.current_rms), 5),
+                "peak_level": round(float(self.current_peak), 5),
+                "is_speech": bool(self.current_is_speech),
+                "bands": list(self.current_bands),
+            }
 
     def cancel(self):
         """Request immediate cancellation of any active recording and release microphone."""
         self._cancel_event.set()
+        self.reset_live_telemetry()
         try:
             sd.stop()
         except Exception:
@@ -313,6 +387,7 @@ class AudioRecorder:
             ) from error
         finally:
             self.is_recording = False
+            self.reset_live_telemetry()
 
     def save_recording(self, audio, filename="recording.wav"):
         """Save NumPy audio data to a WAV file.
@@ -438,6 +513,7 @@ class AudioRecorder:
                         chunk = scipy.signal.resample_poly(chunk, up, down).astype(np.float32)
 
                     vad.feed_samples(chunk)
+                    self.update_live_telemetry(chunk, is_speech=(vad.state == StreamingVAD.STATE_RECORDING))
 
                     if vad.state == StreamingVAD.STATE_RECORDING and not speech_detected_logged:
                         print("Speech detected, recording...")
@@ -467,3 +543,4 @@ class AudioRecorder:
             ) from error
         finally:
             self.is_recording = False
+            self.reset_live_telemetry()

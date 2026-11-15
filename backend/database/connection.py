@@ -5,6 +5,7 @@ Manages SQLite async engine with aiosqlite and SQLModel metadata initialization.
 
 from __future__ import annotations
 
+import json
 import os
 import logging
 from pathlib import Path
@@ -25,6 +26,8 @@ def _set_sqlite_pragma(dbapi_connection, connection_record) -> None:
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys = ON;")
         cursor.execute("PRAGMA journal_mode = WAL;")
+        cursor.execute("PRAGMA synchronous = NORMAL;")
+        cursor.execute("PRAGMA busy_timeout = 5000;")
         cursor.close()
     except Exception as exc:
         logger.debug(f"SQLite PRAGMA configuration skipped or unsupported: {exc}")
@@ -55,7 +58,7 @@ def get_default_db_url(async_driver: bool = True) -> str:
     if custom_path:
         db_path = Path(custom_path).resolve()
     else:
-        db_path = DEFAULT_DB_FILE
+        db_path = get_database_path()
 
     # Ensure parent directory exists for file-based SQLite
     if not str(db_path).startswith(":memory:"):
@@ -335,6 +338,72 @@ def run_migrations_with_connection(conn: Connection) -> Dict[str, Any]:
     except Exception as fts_err:
         fts_available = False
         logger.warning(f"SQLite FTS5 unavailable; falling back to LIKE search: {fts_err}")
+
+    # 4. Non-destructively normalize legacy malformed JSON payloads in execution tables
+    from backend.database.models import normalize_plan_steps, serialize_sanitized_json
+
+    repaired_plans = 0
+    if _table_exists(conn, "executionrecord"):
+        exec_rows = conn.execute(
+            text(
+                "SELECT execution_id, plan_json FROM executionrecord "
+                "WHERE plan_json IS NOT NULL AND TRIM(plan_json) != '' AND plan_json != '[]'"
+            )
+        ).fetchall()
+        for exec_id, raw_plan_json in exec_rows:
+            needs_repair = False
+            try:
+                parsed_plan = json.loads(raw_plan_json)
+                if not isinstance(parsed_plan, list) or any(
+                    not isinstance(item, dict)
+                    or ("parameters" in item and not isinstance(item.get("parameters"), dict))
+                    for item in parsed_plan
+                ):
+                    needs_repair = True
+            except Exception:
+                needs_repair = True
+
+            if needs_repair:
+                normalized = normalize_plan_steps(raw_plan_json)
+                repaired_json = serialize_sanitized_json(normalized) or "[]"
+                conn.execute(
+                    text("UPDATE executionrecord SET plan_json = :norm WHERE execution_id = :eid"),
+                    {"norm": repaired_json, "eid": exec_id},
+                )
+                repaired_plans += 1
+        if repaired_plans:
+            applied_steps.append(f"repaired_legacy_execution_plans:{repaired_plans}")
+            logger.info("Non-destructively migrated %d legacy ExecutionRecord.plan_json rows.", repaired_plans)
+
+    repaired_step_params = 0
+    if _table_exists(conn, "executionsteprecord"):
+        step_rows = conn.execute(
+            text(
+                "SELECT step_id, parameters_json FROM executionsteprecord "
+                "WHERE parameters_json IS NOT NULL AND TRIM(parameters_json) != '' AND parameters_json != '{}'"
+            )
+        ).fetchall()
+        for step_id, raw_params_json in step_rows:
+            needs_step_repair = False
+            repaired_params: Any = None
+            try:
+                parsed_params = json.loads(raw_params_json)
+                if not isinstance(parsed_params, dict):
+                    needs_step_repair = True
+                    repaired_params = {"_legacy_value": parsed_params}
+            except Exception:
+                needs_step_repair = True
+                repaired_params = {"_legacy_raw": str(raw_params_json)}
+
+            if needs_step_repair:
+                repaired_json = serialize_sanitized_json(repaired_params) or "{}"
+                conn.execute(
+                    text("UPDATE executionsteprecord SET parameters_json = :norm WHERE step_id = :sid"),
+                    {"norm": repaired_json, "sid": step_id},
+                )
+                repaired_step_params += 1
+        if repaired_step_params:
+            applied_steps.append(f"repaired_legacy_step_parameters:{repaired_step_params}")
 
     _FTS5_AVAILABLE = fts_available
     return {

@@ -17,6 +17,9 @@ spec_dir = Path(SPECPATH).resolve()
 binaries = []
 binaries += collect_dynamic_libs('ctranslate2')
 binaries += collect_dynamic_libs('onnxruntime')
+binaries += collect_dynamic_libs('webview')
+binaries += collect_dynamic_libs('pythonnet')
+binaries += collect_dynamic_libs('clr_loader')
 
 # 2. Collect read-only runtime data assets
 datas = []
@@ -65,10 +68,13 @@ try:
 except Exception as err:
     print(f"Warning: Could not locate Playwright driver: {err}")
 
-# Package data files for piper phoneme tables and models
+# Package data files for piper phoneme tables, models, and PyWebView/WebView2 runtime
 datas += collect_data_files('piper')
 datas += collect_data_files('openwakeword')
 datas += collect_data_files('faster_whisper')
+datas += collect_data_files('webview')
+datas += collect_data_files('pythonnet')
+datas += collect_data_files('clr_loader')
 
 # 3. Explicit hidden imports for dynamic ASGI/Uvicorn, SQLite, and Win32 modules
 hiddenimports = [
@@ -102,6 +108,13 @@ hiddenimports = [
     'PIL.ImageGrab',
     'pyautogui',
     'pywinauto',
+    'httpx',
+    'webview',
+    'webview.platforms.edgechromium',
+    'webview.platforms.winforms',
+    'clr_loader',
+    'pythonnet',
+    'cryptography',
     'win32gui',
     'win32con',
     'win32api',
@@ -109,6 +122,8 @@ hiddenimports = [
     'backend.paths',
     'backend.version',
     'backend.main',
+    'backend.desktop',
+    'backend.desktop.shell',
     'backend.api.agent',
     'backend.api.memory',
     'backend.api.personalization',
@@ -121,8 +136,10 @@ hiddenimports = [
     'backend.api.providers',
     'backend.ai',
     'backend.ai.providers',
+    'backend.ai.providers.anthropic_adapter',
     'backend.ai.providers.base',
     'backend.ai.providers.credentials',
+    'backend.ai.providers.gemini_adapter',
     'backend.ai.providers.local_ollama',
     'backend.ai.providers.openai_adapter',
     'backend.ai.providers.placeholders',
@@ -150,6 +167,7 @@ hiddenimports = [
     'backend.database.models',
     'backend.database.repository',
     'backend.database.audit_export',
+    'backend.database.backup',
     'backend.agent.graph',
     'backend.agent.intent',
     'backend.agent.llm',
@@ -234,7 +252,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

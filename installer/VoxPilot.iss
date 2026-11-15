@@ -15,7 +15,7 @@
   #error "..\VERSION file is empty."
 #endif
 #define MyAppPublisher "VoxPilot Team"
-#define MyAppURL "https://github.com/VoxPilot"
+#define MyAppURL "https://github.com/Thanush505/VoxPilot"
 #define MyAppExeName "VoxPilot.exe"
 #define MyAppIcon "..\assets\icons\voxpilot.ico"
 #define MyAppWizardSmallImage "..\assets\icons\voxpilot-icon-128x128.png"
@@ -59,7 +59,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
 VersionInfoVersion={#MyAppVersion}.0
 VersionInfoCompany={#MyAppPublisher}
-VersionInfoDescription={#MyAppName} â€” Personal AI Desktop Control Agent Setup
+VersionInfoDescription={#MyAppName} - Personal AI Desktop Control Agent Setup
 VersionInfoProductName={#MyAppName}
 VersionInfoProductVersion={#MyAppVersion}
 VersionInfoCopyright=Copyright (c) 2026 {#MyAppPublisher}
@@ -75,6 +75,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "..\dist\VoxPilot\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Install canonical VERSION file at installation root for post-install verification
 Source: "..\VERSION"; DestDir: "{app}"; Flags: ignoreversion
+; Install helper scripts and documentation referenced by Start Menu shortcuts
+Source: "..\install_browser.bat"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\README_DIST.txt"; DestDir: "{app}"; DestName: "README.txt"; Flags: ignoreversion
 ; Install official application icon into installation root for explicit shortcut & shell branding
 Source: "{#MyAppIcon}"; DestDir: "{app}"; DestName: "voxpilot.ico"; Flags: ignoreversion
 
@@ -96,7 +99,7 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}
 // Inform user during uninstallation that personal databases and logs remain preserved
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
-  if CurUninstallStep = usPostUninstall then
+  if (CurUninstallStep = usPostUninstall) and (not UninstallSilent) then
   begin
     MsgBox('VoxPilot program files have been successfully uninstalled.' + #13#10 + #13#10 +
            'Data Retention Notice:' + #13#10 +

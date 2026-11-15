@@ -6,6 +6,54 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.5.4] - 2026-11-16
+
+### Release Overview
+VoxPilot `v0.5.4` graduates VoxPilot from a localhost web application to a native, console-free Windows 11 desktop application packaged with Microsoft Edge WebView2, multi-provider AI orchestration (Local Ollama + OpenAI / Anthropic Claude / Google Gemini BYOK), redesigned UI/UX with audio-reactive AI Core telemetry, SQLite online backup & recovery, and a verified Inno Setup installer + GitHub updater pipeline.
+
+### Major Features
+- **Native Windows 11 Desktop Shell (Stage B):** PyWebView + Microsoft Edge WebView2 native window (`console=False` Windows GUI executable) backed by an in-process managed Uvicorn/FastAPI server, Windows Named Mutex single-instance guard, and foreground window activation.
+- **Multi-Provider AI Core & BYOK Support (Phase 8D):** Preserves Local Ollama (`qwen3:4b`) as the default local-first provider and adds full OpenAI, Anthropic Claude, and Google Gemini BYOK adapters with per-profile provider selection, model discovery, and Windows DPAPI-encrypted credential storage.
+- **UI/UX Redesign & AI Core Telemetry (Stage C.5):** Unified glassmorphic theme system (`dark` / `light` + accent palette), redesigned Dashboard, Agent workspace, Settings, and an interactive audio-reactive AI Core waveform visualizer.
+
+### AI Core & Voice Improvements
+- Real-time voice mode integration with microphone/focus tracking, `Ctrl + Shift + V` global voice toggle, and `Ctrl + Alt + Escape` global emergency stop.
+- Improved `AudioRecorder` hardware release and `VoiceService` focus/minimize handling without duplicate hotkey registrations.
+
+### Desktop Experience & Windows Integration (Stage C)
+- Canonical Windows `AppUserModelID` (`VoxPilotTeam.VoxPilot.DesktopAgent.0.5.4`) unified across process identity, toast notifications (`HKCU\Software\Classes\AppUserModelId`), Start Menu shortcuts, and desktop shortcuts.
+- Active/inactive window focus tracking integrated with notification activity suppression.
+
+### Security & Privacy
+- Per-launch cryptographic desktop session token injected directly into WebView2 DOM (`window.__VOXPILOT_DESKTOP_TOKEN__`) and stripped immediately by `client.ts`; unauthenticated HTTP requests to protected endpoints are rejected (`401`/`403`).
+- Strict loopback binding (`127.0.0.1`), origin validation, DPAPI-encrypted credentials, secret log redaction, and explicit user confirmation gates for email/destructive actions and updates.
+
+### Persistence & Recovery (Stage D)
+- Strict separation between read-only application binaries (`%LOCALAPPDATA%\Programs\VoxPilot`) and writable user data (`%LOCALAPPDATA%\VoxPilot\`).
+- Consistent SQLite Online Backup & Recovery (`DatabaseBackupManager`) with SHA-256 manifest verification, `PRAGMA integrity_check`, and non-destructive opt-in restore.
+
+### Packaging, Installation & Updater Improvements (Stages E–F)
+- Console-free PyInstaller standalone bundle (`dist\VoxPilot\VoxPilot.exe`) bundling WebView2, Python.NET, Piper TTS, Playwright driver, and Vite production assets.
+- Per-user Inno Setup installer (`VoxPilot-Setup.exe`, `PrivilegesRequired=lowest`) preserving `%LOCALAPPDATA%\VoxPilot` across upgrades and silent/interactive uninstalls.
+- Integrated `UpdateService.trigger_install()` with `DatabaseBackupManager` pre-update snapshots and graceful `DesktopShellController.request_shutdown()`.
+
+### Bug Fixes
+- Fixed updater shutdown handoff so `DesktopShellController.request_shutdown()` cleanly tears down WebView2, Uvicorn, voice hotkeys, and the single-instance mutex before external installer execution.
+- Fixed Start Menu shortcut targets (`install_browser.bat`, `README.txt`) and silent-uninstall dialog guard in `installer/VoxPilot.iss`.
+- Fixed `UpdateService` test thread isolation (`VoxPilotUpdateShutdown` cleanup).
+
+### Known Limitations
+- **Local Ollama Dependency:** Default local LLM agent planning requires Ollama running locally on `http://127.0.0.1:11434` with `qwen3:4b` (unless a BYOK cloud provider is configured).
+- **WebView2 Runtime Requirement:** Requires Microsoft Edge WebView2 Runtime (pre-installed on Windows 11).
+- **Unsigned Binaries:** `VoxPilot.exe` and `VoxPilot-Setup.exe` are currently unsigned (no Authenticode certificate installed), so Windows SmartScreen may display an "Unknown publisher" prompt on first run; verify hashes against `SHA256SUMS.txt`.
+
+### Installation Instructions
+1. Download `VoxPilot-Setup.exe` and `SHA256SUMS.txt` from the GitHub Release.
+2. Verify checksum: `(Get-FileHash VoxPilot-Setup.exe -Algorithm SHA256).Hash` matches `SHA256SUMS.txt`.
+3. Run `VoxPilot-Setup.exe` (installs per-user into `%LOCALAPPDATA%\Programs\VoxPilot` without Admin elevation).
+
+---
+
 ## [Unreleased] - 2026-11-11
 
 ### Added

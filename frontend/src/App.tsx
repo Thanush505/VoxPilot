@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import AppLayout from './components/layout/AppLayout';
 import DashboardPage from './pages/DashboardPage';
-import AgentPage from './pages/AgentPage';
+import AgentPage, { type AgentSpecialistMode } from './pages/AgentPage';
 import ApplicationsPage from './pages/ApplicationsPage';
 import ExecutionsPage from './pages/ExecutionsPage';
 import ConfirmationsPage from './pages/ConfirmationsPage';
@@ -10,16 +10,20 @@ import AuditLogsPage from './pages/AuditLogsPage';
 import SettingsPage from './pages/SettingsPage';
 import UpcomingSection from './components/common/UpcomingSection';
 import useBackendHealth from './hooks/useBackendHealth';
-import apiClient from './api/client';
+import apiClient, { resolveDesktopSessionToken } from './api/client';
 import { ProfileItem } from './api/types';
 import { useTheme } from './theme/ThemeProvider';
+import { AICoreProvider } from './context/AICoreContext';
 import './styles/globals.css';
 import './styles/dashboard.css';
+import './styles/redesign.css';
 
 const UPCOMING_DESCRIPTIONS: Record<string, { title: string; description: string; phase: string }> = {};
 
 export function App() {
   const [currentNav, setCurrentNav] = useState<string>('dashboard');
+  const [agentSpecialistMode, setAgentSpecialistMode] = useState<AgentSpecialistMode>('all');
+  const [pendingAgentPrompt, setPendingAgentPrompt] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<ProfileItem[]>([]);
   const [activeProfile, setActiveProfile] = useState<ProfileItem | null>(null);
   const [isProfileSwitching, setIsProfileSwitching] = useState<boolean>(false);
@@ -52,8 +56,51 @@ export function App() {
   }, [isConnected, syncProfileTheme]);
 
   useEffect(() => {
+    resolveDesktopSessionToken();
+  }, []);
+
+  useEffect(() => {
     loadProfiles();
   }, [loadProfiles]);
+
+  const lastActivitySentRef = useRef<boolean | null>(null);
+
+  useEffect(() => {
+    if (!isConnected) {
+      lastActivitySentRef.current = null;
+      return;
+    }
+
+    const syncWindowActivity = () => {
+      const isFocused = typeof document.hasFocus === 'function' ? document.hasFocus() : true;
+      const isVisible = document.visibilityState !== 'hidden';
+      const isActive = isFocused && isVisible;
+      if (lastActivitySentRef.current === isActive) {
+        return;
+      }
+      lastActivitySentRef.current = isActive;
+      void apiClient.recordNotificationActivity(isActive);
+    };
+
+    syncWindowActivity();
+
+    const handleFocus = () => syncWindowActivity();
+    const handleBlur = () => {
+      if (lastActivitySentRef.current === false) return;
+      lastActivitySentRef.current = false;
+      void apiClient.recordNotificationActivity(false);
+    };
+
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('blur', handleBlur);
+    document.addEventListener('visibilitychange', syncWindowActivity);
+
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('blur', handleBlur);
+      document.removeEventListener('visibilitychange', syncWindowActivity);
+    };
+  }, [isConnected]);
 
   const handleSwitchProfile = async (profileId: string) => {
     if (!profileId || profileId === activeProfile?.id) return;
@@ -74,6 +121,15 @@ export function App() {
     await loadProfiles();
   };
 
+  const handleOpenAgentWorkspace = useCallback(
+    (mode: AgentSpecialistMode = 'all', initialPrompt?: string) => {
+      setAgentSpecialistMode(mode);
+      setPendingAgentPrompt(initialPrompt || null);
+      setCurrentNav('agent');
+    },
+    []
+  );
+
   const profileKey = activeProfile?.id || 'default';
 
   const renderContent = () => {
@@ -89,6 +145,8 @@ export function App() {
             error={error}
             isLoading={isLoading}
             onRefresh={refetch}
+            onNavigate={(nav) => setCurrentNav(nav)}
+            onOpenAgentWorkspace={handleOpenAgentWorkspace}
           />
         );
       case 'agent':
@@ -97,6 +155,9 @@ export function App() {
             key={`agent-${profileKey}`}
             onNavigateToConfirmations={() => setCurrentNav('confirmations')}
             isBackendConnected={isConnected}
+            initialSpecialistMode={agentSpecialistMode}
+            initialPrompt={pendingAgentPrompt}
+            onConsumeInitialPrompt={() => setPendingAgentPrompt(null)}
           />
         );
       case 'applications':
@@ -153,23 +214,29 @@ export function App() {
   };
 
   return (
-    <AppLayout
-      currentNav={currentNav}
-      onSelectNav={(id) => setCurrentNav(id)}
-      connectionState={connectionState}
-      lastChecked={lastChecked}
-      isLoading={isLoading}
-      onRefresh={refetch}
+    <AICoreProvider
+      isConnected={isConnected}
       emergencyStatus={emergencyStatus}
-      profiles={profiles}
-      activeProfile={activeProfile}
-      isProfileSwitching={isProfileSwitching}
-      onSwitchProfile={handleSwitchProfile}
+      activeProfileId={profileKey}
     >
-      <div key={currentNav} className="page-transition-wrapper">
-        {renderContent()}
-      </div>
-    </AppLayout>
+      <AppLayout
+        currentNav={currentNav}
+        onSelectNav={(id) => setCurrentNav(id)}
+        connectionState={connectionState}
+        lastChecked={lastChecked}
+        isLoading={isLoading}
+        onRefresh={refetch}
+        emergencyStatus={emergencyStatus}
+        profiles={profiles}
+        activeProfile={activeProfile}
+        isProfileSwitching={isProfileSwitching}
+        onSwitchProfile={handleSwitchProfile}
+      >
+        <div key={currentNav} className="page-transition-wrapper">
+          {renderContent()}
+        </div>
+      </AppLayout>
+    </AICoreProvider>
   );
 }
 

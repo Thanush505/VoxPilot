@@ -470,7 +470,10 @@ class VoiceService:
                 while not self._ptt_stop_event.is_set():
                     data, _ = stream.read(1024)
                     if data is not None and len(data) > 0:
-                        self._ptt_frames.append(data.copy().reshape(-1))
+                        mono = data.copy().reshape(-1)
+                        self._ptt_frames.append(mono)
+                        if hasattr(self.pipeline.recorder, "update_live_telemetry"):
+                            self.pipeline.recorder.update_live_telemetry(mono, is_speech=True)
             except Exception as err:
                 logger.warning("Push-to-talk microphone error: %s", err)
                 with self._lock:
@@ -480,6 +483,8 @@ class VoiceService:
                     self._emit_event("voice_error", error=self._last_error)
             finally:
                 self.pipeline.recorder.is_recording = False
+                if hasattr(self.pipeline.recorder, "reset_live_telemetry"):
+                    self.pipeline.recorder.reset_live_telemetry()
                 if stream is not None:
                     try:
                         stream.stop()
@@ -746,6 +751,29 @@ class VoiceService:
                 )
                 self._emit_event("voice_error", error=self._last_error, source=source)
             return self.get_status()
+
+        # Stop any wake-word background listener before opening full Voice Mode
+        # so two microphone capture streams never contend for audio hardware.
+        self.stop_wake_word_listener()
+
+        stale_worker: Optional[threading.Thread] = None
+        with self._lock:
+            if self._is_active and self._worker_thread is not None and self._worker_thread.is_alive():
+                if conversation_id:
+                    self._active_conversation_id = conversation_id
+                return self.get_status()
+            if self._worker_thread is not None and self._worker_thread.is_alive():
+                self._stop_event.set()
+                self.pipeline.stop_listening()
+                self.pipeline.stop_speaking()
+                stale_worker = self._worker_thread
+
+        if (
+            stale_worker is not None
+            and stale_worker.is_alive()
+            and stale_worker is not threading.current_thread()
+        ):
+            stale_worker.join(timeout=1.5)
 
         with self._lock:
             if self._is_active and self._worker_thread is not None and self._worker_thread.is_alive():
@@ -1199,11 +1227,37 @@ class VoiceService:
                 ev for ev in self._events if ev["event_id"] > since_event_id
             ]
 
+            rec_active = bool(getattr(self.pipeline.recorder, "is_recording", False)) or self._ptt_active
+            raw_telemetry = (
+                self.pipeline.recorder.get_live_telemetry()
+                if hasattr(self.pipeline.recorder, "get_live_telemetry")
+                else {
+                    "rms_level": float(getattr(self.pipeline.recorder, "current_rms", 0.0)),
+                    "peak_level": float(getattr(self.pipeline.recorder, "current_peak", 0.0)),
+                    "is_speech": bool(getattr(self.pipeline.recorder, "current_is_speech", False)),
+                    "bands": list(getattr(self.pipeline.recorder, "current_bands", [0.0] * 16)),
+                }
+            )
+            telemetry_mode = (
+                "microphone"
+                if rec_active
+                else ("tts" if self._phase == PHASE_SPEAKING else "idle")
+            )
+            audio_telemetry = {
+                "active": bool(rec_active or self._phase == PHASE_SPEAKING),
+                "mode": telemetry_mode,
+                "rms_level": raw_telemetry["rms_level"] if rec_active else 0.0,
+                "peak_level": raw_telemetry["peak_level"] if rec_active else 0.0,
+                "is_speech": raw_telemetry["is_speech"] if rec_active else False,
+                "bands": raw_telemetry["bands"] if rec_active else [0.0] * 16,
+            }
+
             return {
                 "is_active": self._is_active,
                 "phase": self._phase,
-                "is_recording": bool(getattr(self.pipeline.recorder, "is_recording", False)) or self._ptt_active,
+                "is_recording": rec_active,
                 "is_ptt_active": self._ptt_active,
+                "audio_telemetry": audio_telemetry,
                 "wake_word_enabled": cfg.get("wake_word_enabled", False),
                 "conversation_id": self._active_conversation_id,
                 "last_transcript": self._last_transcript,

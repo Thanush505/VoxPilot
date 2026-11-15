@@ -21,10 +21,12 @@ from backend.ai.providers.base import (
     VALID_PROVIDER_IDS,
     assert_no_plaintext_secrets,
 )
+from backend.ai.providers.anthropic_adapter import AnthropicBYOKAdapter, DEFAULT_ANTHROPIC_MODEL
 from backend.ai.providers.credentials import WindowsDPAPIProviderCredentialStore, sanitize_secret
+from backend.ai.providers.gemini_adapter import DEFAULT_GEMINI_MODEL, GeminiBYOKAdapter
 from backend.ai.providers.local_ollama import LocalOllamaProvider
 from backend.ai.providers.openai_adapter import DEFAULT_OPENAI_MODEL, OpenAIBYOKAdapter
-from backend.ai.providers.placeholders import BYOKProvider, VoxPilotCloudProvider
+from backend.ai.providers.placeholders import BYOKProvider, CONFIGURABLE_BYOK_VENDORS, VoxPilotCloudProvider
 from backend.ai.providers.registry import AIProviderRegistry, get_shared_provider_registry
 from backend.ai.providers.runtime import resolve_runtime_provider, run_provider_chat
 
@@ -34,9 +36,14 @@ __all__ = [
     "AIProviderRegistry",
     "AIProviderRequest",
     "AIProviderResponse",
+    "AnthropicBYOKAdapter",
     "BYOKProvider",
+    "CONFIGURABLE_BYOK_VENDORS",
     "CredentialStoreInterface",
+    "DEFAULT_ANTHROPIC_MODEL",
+    "DEFAULT_GEMINI_MODEL",
     "DEFAULT_OPENAI_MODEL",
+    "GeminiBYOKAdapter",
     "LocalOllamaProvider",
     "OpenAIBYOKAdapter",
     "PROVIDER_BYOK",

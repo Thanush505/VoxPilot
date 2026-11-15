@@ -81,7 +81,15 @@ def test_runtime_switching_local_to_byok_and_back_with_memory_preservation(tmp_p
     reg.configure_byok_openai(profile_id="default", api_key=secret, model="gpt-4o-mini", validate=True)
 
     with patch("backend.ai.providers.runtime.get_shared_provider_registry", return_value=reg), \
-         patch("backend.agent.llm.ollama.chat") as mock_ollama_chat:
+         patch("backend.agent.llm.ollama.chat") as mock_ollama_chat, \
+         patch(
+             "backend.ai.providers.local_ollama.get_shared_hardware_monitor",
+             return_value=SimpleNamespace(
+                 get_hardware_snapshot=lambda include_ollama=True: SimpleNamespace(
+                     ollama=SimpleNamespace(reachable=True)
+                 )
+             ),
+         ):
         mock_ollama_chat.return_value = SimpleNamespace(message=SimpleNamespace(content="Local qwen3 reply"))
         llm = OllamaLLM(model="qwen3:4b")
 
@@ -137,7 +145,15 @@ def test_agent_graph_surfaces_byok_errors_without_silent_fallback(tmp_path: Path
     )
 
     with patch("backend.ai.providers.runtime.get_shared_provider_registry", return_value=reg), \
-         patch("backend.agent.llm.ollama.chat") as mock_ollama_chat:
+         patch("backend.agent.llm.ollama.chat") as mock_ollama_chat, \
+         patch(
+             "backend.ai.providers.local_ollama.get_shared_hardware_monitor",
+             return_value=SimpleNamespace(
+                 get_hardware_snapshot=lambda include_ollama=True: SimpleNamespace(
+                     ollama=SimpleNamespace(reachable=True)
+                 )
+             ),
+         ):
         out = graph.generate_response({
             "user_input": "Hello there",
             "intent": "general_conversation",

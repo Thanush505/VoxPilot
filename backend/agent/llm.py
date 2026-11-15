@@ -14,7 +14,6 @@ from typing import Optional, List, Dict, Any
 import ollama
 
 from backend.ai.model_manager import get_shared_model_manager
-from backend.ai.providers.base import AIProviderError
 from backend.database.models import scrub_text_secrets
 
 logger = logging.getLogger(__name__)
@@ -141,6 +140,8 @@ class OllamaLLM:
             }
         )
 
+        from backend.ai.providers.base import AIProviderError
+
         try:
             from backend.ai.providers.runtime import run_provider_chat
 
@@ -216,6 +217,8 @@ class OllamaLLM:
             {"role": "system", "content": "\n\n".join(context_sections)},
             {"role": "user", "content": user_message.strip()},
         ]
+
+        from backend.ai.providers.base import AIProviderError
 
         try:
             from backend.ai.providers.runtime import run_provider_chat

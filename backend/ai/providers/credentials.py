@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,21 +15,53 @@ from backend.ai.providers.base import (
     CredentialStoreInterface,
     ProviderConfigurationError,
 )
-from backend.paths import get_user_data_dir
+from backend.paths import get_credentials_dir
 
 logger = logging.getLogger(__name__)
 
 _TOKEN_RE = re.compile(r"[^a-zA-Z0-9_\-]")
-_SECRET_PATTERN = re.compile(r"\b(?:sk-[A-Za-z0-9_\-]{8,}|Bearer\s+[A-Za-z0-9_\-\.]{12,})\b")
+_SECRET_PATTERN = re.compile(
+    r"(?:\b(?:sk-[A-Za-z0-9_\-]{8,}|AIza[A-Za-z0-9_\-]{12,}|"
+    r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b|"
+    r"\b(?:x-voxpilot-desktop-token|x-api-key|x-goog-api-key|authorization)\s*[:=]\s*(?:Bearer\s+)?[^\s,;\"']+|"
+    r"\bBearer\s+[A-Za-z0-9_\-\.~+/]+=*)",
+    re.IGNORECASE,
+)
 
 
 def sanitize_secret(text: str, secret: Optional[str] = None) -> str:
-    """Redact API keys or Bearer tokens from error strings and log messages."""
+    """Redact API keys, Bearer tokens, or header secrets from error strings and log messages."""
     cleaned = str(text or "")
     if secret and len(secret) >= 4:
         cleaned = cleaned.replace(secret, "[REDACTED]")
     cleaned = _SECRET_PATTERN.sub("[REDACTED]", cleaned)
     return cleaned
+
+
+class SecretRedactingLogFilter(logging.Filter):
+    """Logging filter that redacts API keys, session tokens, and secrets before emission."""
+
+    @staticmethod
+    def _clean(value: str) -> str:
+        from backend.database.models import scrub_text_secrets
+
+        return sanitize_secret(scrub_text_secrets(value))
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = self._clean(record.msg)
+        if record.args:
+            if isinstance(record.args, dict):
+                record.args = {
+                    k: self._clean(v) if isinstance(v, str) else v
+                    for k, v in record.args.items()
+                }
+            elif isinstance(record.args, tuple):
+                record.args = tuple(
+                    self._clean(a) if isinstance(a, str) else a
+                    for a in record.args
+                )
+        return True
 
 
 def _safe_token(value: str, fallback: str) -> str:
@@ -53,7 +86,7 @@ class WindowsDPAPIProviderCredentialStore(CredentialStoreInterface):
         if storage_dir is not None:
             self.storage_dir = Path(storage_dir)
         else:
-            self.storage_dir = get_user_data_dir() / "credentials"
+            self.storage_dir = get_credentials_dir()
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._dpapi = dpapi_backend or DPAPICredentialStore(storage_dir=self.storage_dir)
 
@@ -110,7 +143,9 @@ class WindowsDPAPIProviderCredentialStore(CredentialStoreInterface):
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         path = self._blob_path(safe_profile, safe_vendor)
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp_path = path.with_suffix(".dpapi.tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(tmp_path, path)
         logger.info("Stored DPAPI-encrypted BYOK credential ref='%s' for profile='%s'", ref, safe_profile)
         return ref
 

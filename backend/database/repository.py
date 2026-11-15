@@ -18,6 +18,7 @@ from backend.database.models import (
     ExecutionRecord,
     ExecutionStepRecord,
     MemoryRecord,
+    normalize_plan_steps,
     serialize_sanitized_json,
 )
 from backend.database.connection import get_sessionmaker, get_sync_engine, run_migrations_sync
@@ -141,6 +142,7 @@ class DatabaseRepository:
         intent = state.get("intent")
         status = state.get("execution_status", "started")
         plan = state.get("plan", [])
+        normalized_plan = normalize_plan_steps(plan)
         current_step = state.get("current_step", 0)
         response = state.get("response")
         error = state.get("error")
@@ -148,8 +150,8 @@ class DatabaseRepository:
         now = datetime.now(timezone.utc)
         completed_at = now if status in ("completed", "failed", "cancelled") else None
 
-        # Sanitize plan to strip any tokens
-        sanitized_plan_json = serialize_sanitized_json(plan)
+        # Sanitize normalized plan to strip any tokens without mutating caller state
+        sanitized_plan_json = serialize_sanitized_json(normalized_plan)
 
         async with self._session_maker() as session:
             stmt = select(ExecutionRecord).where(ExecutionRecord.execution_id == exec_id)
@@ -361,13 +363,14 @@ class DatabaseRepository:
         intent = state.get("intent")
         status = state.get("execution_status", "started")
         plan = state.get("plan", [])
+        normalized_plan = normalize_plan_steps(plan)
         current_step = state.get("current_step", 0)
         response = state.get("response")
         error = state.get("error")
 
         now = datetime.now(timezone.utc)
         completed_at = now if status in ("completed", "failed", "cancelled") else None
-        sanitized_plan_json = serialize_sanitized_json(plan)
+        sanitized_plan_json = serialize_sanitized_json(normalized_plan)
 
         with Session(self._sync_engine) as session:
             stmt = select(ExecutionRecord).where(ExecutionRecord.execution_id == exec_id)

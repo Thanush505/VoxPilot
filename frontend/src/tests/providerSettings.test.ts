@@ -67,5 +67,31 @@ describe('Phase 8B/8C AI Provider & BYOK API Client', () => {
       expect.stringContaining('/api/providers/byok/openai/credentials'),
       expect.objectContaining({ method: 'DELETE' })
     );
+
+    await apiClient.configureBYOKVendor('anthropic', {
+      api_key: 'sk-ant-test-123456',
+      model: 'claude-sonnet-4-20250514',
+      validate_connection: true,
+    });
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      expect.stringContaining('/api/providers/byok/anthropic/configure'),
+      expect.objectContaining({ method: 'POST' })
+    );
+
+    await apiClient.configureBYOKVendor('google', {
+      api_key: 'AIzaSyTestGemini123456',
+      model: 'gemini-2.5-flash',
+      validate_connection: true,
+    });
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      expect.stringContaining('/api/providers/byok/google/configure'),
+      expect.objectContaining({ method: 'POST' })
+    );
+
+    await apiClient.getBYOKVendorModels('google', true);
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      expect.stringContaining('/api/providers/byok/google/models?refresh=true'),
+      expect.any(Object)
+    );
   });
 });

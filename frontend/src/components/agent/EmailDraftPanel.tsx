@@ -87,19 +87,19 @@ export const EmailDraftPanel: React.FC<EmailDraftPanelProps> = ({
   };
 
   return (
-    <div className="settings-card" style={{ marginTop: '10px', padding: '12px' }}>
-      <div className="settings-card-header" style={{ marginBottom: '8px' }}>
+    <div className="vp-email-draft-card" data-testid="email-draft-panel">
+      <div className="vp-email-draft-header">
         <div className="settings-card-title">
           <Edit3 size={16} />
           <strong>Editable Email Draft</strong>
         </div>
-        <span className="badge">{draft.status}</span>
+        <span className="vp-inline-badge">{draft.status}</span>
       </div>
 
-      <div style={{ display: 'grid', gap: '8px' }}>
+      <div className="vp-email-draft-grid">
         <input
           type="text"
-          className="form-input"
+          className="vp-provider-input"
           placeholder="Recipient email(s), comma-separated"
           value={toText}
           onChange={(e) => setToText(e.target.value)}
@@ -107,46 +107,40 @@ export const EmailDraftPanel: React.FC<EmailDraftPanelProps> = ({
         />
         <input
           type="text"
-          className="form-input"
+          className="vp-provider-input"
           placeholder="Subject"
           value={subject}
           onChange={(e) => setSubject(e.target.value)}
           disabled={!!pendingToken || draft.status === 'sent'}
         />
-        <textarea
-          className="form-input"
-          rows={5}
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-          disabled={!!pendingToken || draft.status === 'sent'}
-        />
       </div>
 
+      <textarea
+        className="vp-provider-input"
+        rows={5}
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+        disabled={!!pendingToken || draft.status === 'sent'}
+      />
+
       {statusNote && (
-        <div style={{ marginTop: '8px', fontSize: '0.85rem' }}>{statusNote}</div>
+        <div className="vp-inline-meta-bar">{statusNote}</div>
       )}
 
       {pendingToken ? (
-        <div
-          style={{
-            marginTop: '10px',
-            padding: '10px',
-            borderRadius: '8px',
-            border: '1px solid var(--border-color, #444)',
-          }}
-        >
-          <div style={{ fontWeight: 600, marginBottom: '6px' }}>
+        <div className="vp-provider-section-card">
+          <div style={{ fontWeight: 600, fontSize: 13 }}>
             Final Send Confirmation — Verify exact message before sending:
           </div>
-          <div style={{ fontSize: '0.85rem', marginBottom: '8px' }}>
+          <div style={{ fontSize: 12.5, color: 'var(--text-secondary)' }}>
             <div><strong>To:</strong> {toText}</div>
             <div><strong>Subject:</strong> {subject}</div>
-            <div style={{ whiteSpace: 'pre-wrap', marginTop: '4px' }}>{body}</div>
+            <div style={{ whiteSpace: 'pre-wrap', marginTop: 6 }}>{body}</div>
           </div>
-          <div style={{ display: 'flex', gap: '8px' }}>
+          <div className="vp-provider-actions-row">
             <button
               type="button"
-              className="state-action-btn"
+              className="vp-btn-primary"
               onClick={handleConfirmSend}
               disabled={busy}
             >
@@ -155,7 +149,7 @@ export const EmailDraftPanel: React.FC<EmailDraftPanelProps> = ({
             </button>
             <button
               type="button"
-              className="refresh-btn"
+              className="vp-btn-secondary"
               onClick={() => setPendingToken(null)}
               disabled={busy}
             >
@@ -166,10 +160,10 @@ export const EmailDraftPanel: React.FC<EmailDraftPanelProps> = ({
         </div>
       ) : (
         draft.status !== 'sent' && (
-          <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
+          <div className="vp-provider-actions-row">
             <button
               type="button"
-              className="refresh-btn"
+              className="vp-btn-secondary"
               onClick={handleSaveEdits}
               disabled={busy}
             >
@@ -177,7 +171,7 @@ export const EmailDraftPanel: React.FC<EmailDraftPanelProps> = ({
             </button>
             <button
               type="button"
-              className="state-action-btn"
+              className="vp-btn-primary"
               onClick={handleRequestSend}
               disabled={busy}
             >

@@ -108,7 +108,9 @@ export const EmailSettingsSection: React.FC<EmailSettingsSectionProps> = ({
           <Mail size={18} />
           <h3>Email Assistant Account (IMAP / SMTP)</h3>
         </div>
-        <span className="badge">{connected ? 'Connected' : 'Not Connected'}</span>
+        <span className={`status-pill ${connected ? 'success' : 'neutral'}`}>
+          {connected ? 'Connected' : 'Not Connected'}
+        </span>
       </div>
       <p className="settings-description">
         Connect an authorized email account for profile <code>{activeProfileId}</code> using an App Password.
@@ -137,7 +139,7 @@ export const EmailSettingsSection: React.FC<EmailSettingsSectionProps> = ({
           </div>
           <button
             type="button"
-            className="refresh-btn"
+            className="vp-btn-secondary"
             onClick={handleDisconnect}
             disabled={saving}
           >
@@ -215,7 +217,7 @@ export const EmailSettingsSection: React.FC<EmailSettingsSectionProps> = ({
             />
             <span>I authorize VoxPilot to access this mailbox for this profile only.</span>
           </label>
-          <button type="submit" className="state-action-btn" disabled={saving}>
+          <button type="submit" className="vp-btn-primary" disabled={saving}>
             <Lock size={14} />
             <span>{saving ? 'Saving...' : 'Connect Email Account'}</span>
           </button>

@@ -7,6 +7,7 @@ loading/unloading controls without external network egress or unsafe shell calls
 from __future__ import annotations
 
 import logging
+import os
 from typing import List, Optional
 
 import anyio
@@ -35,6 +36,14 @@ from backend.ai.model_manager import (
 )
 from backend.api.agent import _verify_trusted_request
 from backend.automation.notifications import get_shared_notification_service
+from backend.database.backup import BackupError, DatabaseBackupManager
+from backend.desktop.shell import (
+    DEFAULT_MUTEX_NAME,
+    focus_window_by_title,
+    get_canonical_app_user_model_id,
+    get_shared_desktop_controller,
+)
+from backend.paths import get_database_path, get_runtime_paths_summary
 from backend.automation.startup_manager import (
     StartupConfigurationError,
     StartupManagerError,
@@ -87,6 +96,12 @@ class NotificationPreferencesUpdateRequest(BaseModel):
 
 class NotificationActivityRequest(BaseModel):
     active: bool = True
+
+
+class BackupCreateRequest(BaseModel):
+    label: Optional[str] = Field(default=None, max_length=64, description="Optional label for backup folder.")
+    include_config: bool = True
+    include_credentials: bool = True
 
 
 class SystemModelsResponse(BaseModel):
@@ -317,8 +332,86 @@ def _register_routes(r: APIRouter) -> None:
     async def record_notification_activity(request: Request, req: NotificationActivityRequest):
         """Record whether the VoxPilot window is currently active for suppression."""
         _verify_trusted_request(request)
-        get_shared_notification_service().record_ui_activity(req.active)
+        controller = get_shared_desktop_controller()
+        if controller is not None:
+            controller.set_focus_state(bool(req.active))
+        else:
+            get_shared_notification_service().record_ui_activity(req.active)
         return {"ok": True}
+
+    @r.get("/desktop/status")
+    async def get_desktop_status(request: Request):
+        """Return runtime status for the VoxPilot native desktop shell or headless server."""
+        _verify_trusted_request(request)
+        controller = get_shared_desktop_controller()
+        if controller is not None:
+            payload = controller.get_status_dict()
+            payload["single_instance_mutex"] = DEFAULT_MUTEX_NAME
+            return payload
+
+        try:
+            port_val = int(os.environ.get("VOXPILOT_PORT", "8000"))
+        except ValueError:
+            port_val = 8000
+        return {
+            "mode": "server_only",
+            "window_title": "VoxPilot",
+            "window_active": False,
+            "window_focused": False,
+            "window_minimized": False,
+            "app_user_model_id": get_canonical_app_user_model_id(),
+            "host": os.environ.get("VOXPILOT_HOST", "127.0.0.1"),
+            "port": port_val,
+            "base_url": None,
+            "pid": os.getpid(),
+            "single_instance_mutex": DEFAULT_MUTEX_NAME,
+        }
+
+    @r.post("/desktop/focus")
+    async def focus_desktop_window(request: Request):
+        """Restore and bring an active VoxPilot desktop window to the foreground."""
+        _verify_trusted_request(request, require_desktop_token=False)
+        controller = get_shared_desktop_controller()
+        focused = False
+        if controller is not None:
+            focused = bool(controller.focus_window())
+        win_focused = focus_window_by_title("VoxPilot")
+        return {"ok": True, "focused": bool(focused or win_focused)}
+
+    @r.get("/storage")
+    async def get_storage_status(request: Request):
+        """Return runtime application data paths and backup inventory (no secret contents)."""
+        _verify_trusted_request(request)
+        db_file = get_database_path()
+        backup_mgr = DatabaseBackupManager()
+        backups = await anyio.to_thread.run_sync(backup_mgr.list_backups)
+        return {
+            "paths": get_runtime_paths_summary(),
+            "database": {
+                "path": str(db_file),
+                "exists": db_file.exists(),
+                "size_bytes": db_file.stat().st_size if db_file.is_file() else 0,
+            },
+            "backups": backups,
+        }
+
+    @r.post("/backups")
+    async def create_system_backup(request: Request, req: Optional[BackupCreateRequest] = None):
+        """Create a SQLite-consistent online backup snapshot without overwriting existing backups."""
+        _verify_trusted_request(request)
+        payload = req or BackupCreateRequest()
+        backup_mgr = DatabaseBackupManager()
+        try:
+            manifest = await anyio.to_thread.run_sync(
+                lambda: backup_mgr.create_backup(
+                    label=payload.label,
+                    include_config=payload.include_config,
+                    include_credentials=payload.include_credentials,
+                )
+            )
+            return manifest
+        except BackupError as exc:
+            return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={"detail": str(exc)})
 
 
 _register_routes(api_system_router)

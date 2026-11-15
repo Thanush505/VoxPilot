@@ -84,3 +84,24 @@ In Phase 8B+, these callers can route text generation through `get_shared_provid
 - `backend/ai/vision.py` (`VisionService.analyze_image`): local multimodal `images=[...]` call for local vision models (`moondream`, `qwen2.5vl:3b`) when Local AI is active.
 - `backend/voice/voice_pipeline.py` (`ollama.list()`): only invoked during initialization when `active_provider_id == "local"`.
 - `backend/ai/hardware_monitor.py` & `backend/ai/model_manager.py`: local Ollama hardware/model lifecycle management.
+
+## Phase 8D: Anthropic Claude & Google Gemini BYOK Integration
+
+### 1. Multi-Vendor BYOK Adapters
+- **OpenAI (`backend/ai/providers/openai_adapter.py`):** `Authorization: Bearer <key>`, `/v1/models` & `/v1/chat/completions`, `structured_output=True` (`response_format={"type":"json_object"}`).
+- **Anthropic Claude (`backend/ai/providers/anthropic_adapter.py`):** `x-api-key` + `anthropic-version: 2023-06-01`, `/v1/models` (validation + discovery) & `/v1/messages`. Extracts `role: "system"` into top-level `"system"`, requires `max_tokens`, parses `content` text blocks, and honestly reports `structured_output=False` (no native OpenAI-style `response_format` JSON mode).
+- **Google Gemini (`backend/ai/providers/gemini_adapter.py`):** `x-goog-api-key` header (never query-string keys), `/v1beta/models` (validation + discovery filtered by `generateContent`) & `/v1beta/models/{model}:generateContent`. Maps `role: "system"` into `systemInstruction`, conversation roles into `"user"` / `"model"`, and supports `structured_output=True` via `generationConfig.responseMimeType = "application/json"`.
+
+### 2. Vendor-Specific Credential References & Profile Isolation
+- `WindowsDPAPIProviderCredentialStore` stores separate DPAPI-encrypted blobs per `(profile_id, vendor)` at `<user_data_dir>/credentials/byok_<profile_id>_<vendor>.dpapi.json` with references `byok:<profile_id>:<vendor>`.
+- Profiles can store keys for OpenAI, Anthropic, and Gemini simultaneously; per-vendor selected models are persisted in `ProfileProviderConfigRecord.config_json["byok_vendors"]` without secrets or credential refs.
+- Saving a key never auto-activates BYOK or switches away from the currently active provider.
+
+### 3. Multi-Vendor API & Settings UI
+- `GET /api/providers` and `GET /api/providers/byok/vendors` return safe per-vendor status (`configured`, `is_active`, `selected_model`, `capabilities`, `models`).
+- `POST /api/providers/byok/{vendor}/configure`, `POST /api/providers/byok/{vendor}/validate`, `GET /api/providers/byok/{vendor}/models`, `POST /api/providers/byok/{vendor}/model`, and `DELETE /api/providers/byok/{vendor}/credentials` support `openai`, `anthropic`, and `google`.
+- `ProviderSettingsCard` renders cards for Local Ollama, OpenAI, Anthropic Claude, Google Gemini, and VoxPilot Cloud (coming soon) with masked key inputs, model refresh/selection, validation, explicit activation, and confirmed deletion.
+
+### 4. Known Limitations
+- Streaming, native tool calling, and external vision remain disabled (`False`) across all BYOK adapters.
+- Anthropic `structured_output=False` means workflows requiring `json_mode=True` (such as LLM fallback intent/planning or JSON email drafting) raise `ProviderConfigurationError` rather than silently downgrading.

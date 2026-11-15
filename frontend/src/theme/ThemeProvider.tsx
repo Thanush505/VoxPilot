@@ -10,6 +10,26 @@ import apiClient from '../api/client';
 import { AccentColorId, ProfileItem, ThemeMode } from '../api/types';
 
 export type ResolvedTheme = 'dark' | 'light';
+export type MotionIntensity = 'subtle' | 'balanced' | 'expressive';
+export type ReducedMotionMode = 'system' | 'on' | 'off';
+
+export interface MotionPreferences {
+  animationsEnabled: boolean;
+  motionIntensity: MotionIntensity;
+  reducedMotionMode: ReducedMotionMode;
+  aiCoreAnimationEnabled: boolean;
+  voiceOrbEnabled: boolean;
+  waveformEnabled: boolean;
+}
+
+export const DEFAULT_MOTION_PREFERENCES: MotionPreferences = {
+  animationsEnabled: true,
+  motionIntensity: 'balanced',
+  reducedMotionMode: 'system',
+  aiCoreAnimationEnabled: true,
+  voiceOrbEnabled: true,
+  waveformEnabled: true,
+};
 
 export interface AccentPreset {
   id: AccentColorId;
@@ -88,6 +108,99 @@ const PRESET_MAP = new Map<string, AccentPreset>(
 
 const STORAGE_LAST_KEY = 'voxpilot.theme.lastActive';
 const storageProfileKey = (profileId: string) => `voxpilot.theme.profile.${profileId}`;
+const MOTION_LAST_KEY = 'voxpilot_motion_prefs_v1';
+const motionProfileKey = (profileId: string) => `voxpilot_motion_prefs_v1.${profileId}`;
+
+export function resolveEffectiveReducedMotion(
+  prefs: MotionPreferences,
+  systemPrefersReducedMotion: boolean
+): boolean {
+  if (!prefs.animationsEnabled) return true;
+  if (prefs.reducedMotionMode === 'on') return true;
+  if (prefs.reducedMotionMode === 'off') return false;
+  return systemPrefersReducedMotion;
+}
+
+function getSystemPrefersReducedMotion(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    return false;
+  }
+  try {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  } catch {
+    return false;
+  }
+}
+
+export function normalizeMotionPreferences(raw: unknown): MotionPreferences {
+  if (!raw || typeof raw !== 'object') {
+    return { ...DEFAULT_MOTION_PREFERENCES };
+  }
+  const obj = raw as Record<string, unknown>;
+  const intensity =
+    obj.motionIntensity === 'subtle' ||
+      obj.motionIntensity === 'balanced' ||
+      obj.motionIntensity === 'expressive'
+      ? obj.motionIntensity
+      : DEFAULT_MOTION_PREFERENCES.motionIntensity;
+  const reducedMode =
+    obj.reducedMotionMode === 'system' ||
+      obj.reducedMotionMode === 'on' ||
+      obj.reducedMotionMode === 'off'
+      ? obj.reducedMotionMode
+      : DEFAULT_MOTION_PREFERENCES.reducedMotionMode;
+
+  return {
+    animationsEnabled:
+      typeof obj.animationsEnabled === 'boolean'
+        ? obj.animationsEnabled
+        : DEFAULT_MOTION_PREFERENCES.animationsEnabled,
+    motionIntensity: intensity,
+    reducedMotionMode: reducedMode,
+    aiCoreAnimationEnabled:
+      typeof obj.aiCoreAnimationEnabled === 'boolean'
+        ? obj.aiCoreAnimationEnabled
+        : DEFAULT_MOTION_PREFERENCES.aiCoreAnimationEnabled,
+    voiceOrbEnabled:
+      typeof obj.voiceOrbEnabled === 'boolean'
+        ? obj.voiceOrbEnabled
+        : DEFAULT_MOTION_PREFERENCES.voiceOrbEnabled,
+    waveformEnabled:
+      typeof obj.waveformEnabled === 'boolean'
+        ? obj.waveformEnabled
+        : DEFAULT_MOTION_PREFERENCES.waveformEnabled,
+  };
+}
+
+function readLocalMotion(profileId: string): MotionPreferences {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return { ...DEFAULT_MOTION_PREFERENCES };
+  }
+  try {
+    const rawProfile = window.localStorage.getItem(motionProfileKey(profileId));
+    if (rawProfile) {
+      return normalizeMotionPreferences(JSON.parse(rawProfile));
+    }
+    const rawLast = window.localStorage.getItem(MOTION_LAST_KEY);
+    if (rawLast) {
+      return normalizeMotionPreferences(JSON.parse(rawLast));
+    }
+  } catch {
+    return { ...DEFAULT_MOTION_PREFERENCES };
+  }
+  return { ...DEFAULT_MOTION_PREFERENCES };
+}
+
+function writeLocalMotion(profileId: string, prefs: MotionPreferences): void {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  try {
+    const payload = JSON.stringify(prefs);
+    window.localStorage.setItem(motionProfileKey(profileId), payload);
+    window.localStorage.setItem(MOTION_LAST_KEY, payload);
+  } catch {
+    // Ignore storage quota errors
+  }
+}
 
 export function normalizeThemeMode(value: unknown): ThemeMode {
   if (typeof value === 'string') {
@@ -153,17 +266,20 @@ function writeLocalTheme(
   }
 }
 
-export interface ThemeContextValue {
+export interface ThemeContextValue extends MotionPreferences {
   themeMode: ThemeMode;
   resolvedTheme: ResolvedTheme;
   accentColor: AccentColorId;
   activeProfileId: string;
   isSaving: boolean;
   saveError: string | null;
+  effectiveReducedMotion: boolean;
   setThemeMode: (mode: ThemeMode) => Promise<void>;
   setAccentColor: (color: AccentColorId) => Promise<void>;
   restoreDefaultTheme: () => Promise<void>;
   syncProfileTheme: (profile: ProfileItem | null) => void;
+  updateMotionPreferences: (updates: Partial<MotionPreferences>) => void;
+  resetMotionPreferences: () => void;
 }
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
@@ -186,8 +302,48 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({
     initialCached.accentColor
   );
   const [systemDark, setSystemDark] = useState<boolean>(getSystemPrefersDark);
+  const [systemReducedMotion, setSystemReducedMotion] = useState<boolean>(
+    getSystemPrefersReducedMotion
+  );
+  const [motionPrefs, setMotionPrefs] = useState<MotionPreferences>(() =>
+    readLocalMotion('default')
+  );
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  // Listen to OS prefers-reduced-motion changes
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return;
+    }
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    setSystemReducedMotion(mq.matches);
+    const onMotionChange = (event: MediaQueryListEvent) => {
+      setSystemReducedMotion(event.matches);
+    };
+    if (typeof mq.addEventListener === 'function') {
+      mq.addEventListener('change', onMotionChange);
+      return () => mq.removeEventListener('change', onMotionChange);
+    }
+    mq.addListener(onMotionChange);
+    return () => mq.removeListener(onMotionChange);
+  }, []);
+
+  const effectiveReducedMotion = useMemo(
+    () => resolveEffectiveReducedMotion(motionPrefs, systemReducedMotion),
+    [motionPrefs, systemReducedMotion]
+  );
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const root = document.documentElement;
+    root.setAttribute(
+      'data-animations',
+      motionPrefs.animationsEnabled ? 'enabled' : 'disabled'
+    );
+    root.setAttribute('data-motion-intensity', motionPrefs.motionIntensity);
+    root.setAttribute('data-reduced-motion', String(effectiveReducedMotion));
+  }, [motionPrefs, effectiveReducedMotion]);
 
   // Listen to OS/Windows prefers-color-scheme changes when System mode is selected
   useEffect(() => {
@@ -303,8 +459,26 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({
     setThemeModeState(nextMode);
     setAccentColorState(nextAccent);
     writeLocalTheme(pid, nextMode, nextAccent);
+    setMotionPrefs(readLocalMotion(pid));
     setSaveError(null);
   }, []);
+
+  const updateMotionPreferences = useCallback(
+    (updates: Partial<MotionPreferences>) => {
+      setMotionPrefs((prev) => {
+        const next = normalizeMotionPreferences({ ...prev, ...updates });
+        writeLocalMotion(activeProfileId, next);
+        return next;
+      });
+    },
+    [activeProfileId]
+  );
+
+  const resetMotionPreferences = useCallback(() => {
+    const defaults = { ...DEFAULT_MOTION_PREFERENCES };
+    setMotionPrefs(defaults);
+    writeLocalMotion(activeProfileId, defaults);
+  }, [activeProfileId]);
 
   const value = useMemo<ThemeContextValue>(
     () => ({
@@ -314,10 +488,14 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({
       activeProfileId,
       isSaving,
       saveError,
+      ...motionPrefs,
+      effectiveReducedMotion,
       setThemeMode,
       setAccentColor,
       restoreDefaultTheme,
       syncProfileTheme,
+      updateMotionPreferences,
+      resetMotionPreferences,
     }),
     [
       themeMode,
@@ -326,10 +504,14 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({
       activeProfileId,
       isSaving,
       saveError,
+      motionPrefs,
+      effectiveReducedMotion,
       setThemeMode,
       setAccentColor,
       restoreDefaultTheme,
       syncProfileTheme,
+      updateMotionPreferences,
+      resetMotionPreferences,
     ]
   );
 

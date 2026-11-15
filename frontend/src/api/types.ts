@@ -265,11 +265,21 @@ export interface VoiceEvent {
   execution?: ExecutionStatusResponse | null;
 }
 
+export interface VoiceAudioTelemetry {
+  active: boolean;
+  mode: 'microphone' | 'tts' | 'idle';
+  rms_level: number;
+  peak_level: number;
+  is_speech: boolean;
+  bands: number[];
+}
+
 export interface VoiceStatusResponse {
   is_active: boolean;
   phase: VoicePhase;
   is_recording: boolean;
   is_ptt_active?: boolean;
+  audio_telemetry?: VoiceAudioTelemetry;
   wake_word_enabled?: boolean;
   conversation_id: string | null;
   last_transcript: string | null;
@@ -1049,6 +1059,17 @@ export interface AutomationExecutionHistoryListResponse {
 // ============================================================================
 
 export type AIProviderId = 'local' | 'byok' | 'voxpilot_cloud';
+export type BYOKVendorId = 'openai' | 'anthropic' | 'google';
+
+export interface BYOKVendorStatus {
+  vendor: BYOKVendorId;
+  display_name: string;
+  configured: boolean;
+  is_active: boolean;
+  selected_model: string;
+  capabilities: AIProviderCapabilities;
+  models: AIProviderModelInfo[];
+}
 
 export interface AIProviderCapabilities {
   streaming: boolean;
@@ -1099,6 +1120,21 @@ export interface ProfileProviderConfig {
 export interface ProvidersListResponse {
   providers: AIProviderSummary[];
   byok_models?: AIProviderModelInfo[];
+  byok_vendors?: BYOKVendorStatus[];
+}
+
+export interface BYOKConfigureResponse {
+  profile_config: ProfileProviderConfig;
+  vendor: BYOKVendorId | string;
+  health: AIProviderHealth;
+  validated: boolean;
+}
+
+export interface BYOKValidateResponse {
+  provider_id: string;
+  vendor: BYOKVendorId | string;
+  valid: boolean;
+  health: AIProviderHealth;
 }
 
 export interface ActiveProviderResponse {

@@ -70,7 +70,7 @@ export const StartupSettingsCard: React.FC<StartupSettingsCardProps> = ({
           <Power size={18} />
           <h3>Wake-on-Startup (Windows Sign-In)</h3>
         </div>
-        <span className="badge">
+        <span className={`status-pill ${startupStatus?.enabled ? 'success' : 'neutral'}`}>
           {startupStatus?.enabled ? 'Enabled' : 'Disabled'}
         </span>
       </div>

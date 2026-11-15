@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import Sidebar from './Sidebar';
 import Header from './Header';
 import UpdateNotificationBanner from '../updates/UpdateNotificationBanner';
@@ -36,6 +36,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
   children,
 }) => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const mainContentRef = useRef<HTMLDivElement | null>(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
     try {
       return window.localStorage.getItem('voxpilot.sidebar.collapsed') === 'true';
@@ -43,6 +44,27 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
       return false;
     }
   });
+
+  useEffect(() => {
+    const container = mainContentRef.current;
+    if (!container) return;
+    if (typeof container.scrollTo === 'function') {
+      container.scrollTo({ top: 0, behavior: 'auto' });
+    } else {
+      container.scrollTop = 0;
+    }
+  }, [currentNav]);
+
+  useEffect(() => {
+    if (!isSidebarOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsSidebarOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isSidebarOpen]);
 
   const handleToggleSidebarCollapse = () => {
     setIsSidebarCollapsed((prev) => {
@@ -71,7 +93,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
         onToggleCollapse={handleToggleSidebarCollapse}
       />
 
-      <div className="main-content">
+      <div className="main-content" ref={mainContentRef}>
         <Header
           pageTitle={pageTitle}
           connectionState={connectionState}

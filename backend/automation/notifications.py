@@ -30,15 +30,72 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from backend.automation.emergency_stop import get_shared_emergency_stop_manager
-from backend.paths import get_config_dir, is_frozen
+from backend.desktop.shell import (
+    get_canonical_app_user_model_id,
+    get_shared_desktop_controller,
+    is_native_window_foreground,
+)
+from backend.paths import get_app_icon_path, get_bundle_dir, get_config_dir, is_frozen
 from backend.profiles.service import get_shared_profile_service
 
 logger = logging.getLogger(__name__)
 
-# Built-in Windows PowerShell AppUserModelID works reliably in development mode
-# without requiring Start Menu shortcut registration or administrator rights.
+# Built-in Windows PowerShell AppUserModelID fallback when a shell lacks registered shortcut/AUMID.
 WINDOWS_POWERSHELL_AUMID = r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"
-VOXPILOT_PACKAGED_AUMID = "VoxPilot.DesktopAssistant"
+VOXPILOT_PACKAGED_AUMID = get_canonical_app_user_model_id()
+
+
+def resolve_toast_logo_path() -> Optional[Path]:
+    """Locate the highest-resolution VoxPilot toast icon available in bundle/dev assets."""
+    bundle_dir = get_bundle_dir()
+    candidates = [
+        bundle_dir / "frontend" / "public" / "icons" / "voxpilot-icon-128x128.png",
+        bundle_dir / "frontend" / "dist" / "icons" / "voxpilot-icon-128x128.png",
+    ]
+    ico_path = get_app_icon_path()
+    if ico_path is not None:
+        candidates.append(ico_path)
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return candidate.resolve()
+        except Exception:
+            continue
+    return None
+
+
+def ensure_windows_aumid_registered(app_id: Optional[str] = None) -> bool:
+    """Idempotently register VoxPilot's AppUserModelID under HKCU\\Software\\Classes\\AppUserModelId.
+
+    Per-user registration requires no elevation and gives Windows 11 native toast notifications
+    proper 'VoxPilot' display name and icon branding in both development and packaged modes.
+    """
+    if sys.platform != "win32":
+        return False
+
+    target_aumid = (app_id or get_canonical_app_user_model_id()).strip()
+    if not target_aumid:
+        return False
+
+    try:
+        import winreg
+
+        reg_path = rf"Software\Classes\AppUserModelId\{target_aumid}"
+        icon_path = resolve_toast_logo_path()
+        with winreg.CreateKeyEx(
+            winreg.HKEY_CURRENT_USER,
+            reg_path,
+            0,
+            winreg.KEY_SET_VALUE | winreg.KEY_READ,
+        ) as key:
+            winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "VoxPilot")
+            winreg.SetValueEx(key, "IconBackgroundColor", 0, winreg.REG_SZ, "FF0B0F17")
+            if icon_path is not None:
+                winreg.SetValueEx(key, "IconUri", 0, winreg.REG_SZ, str(icon_path))
+        return True
+    except Exception as exc:
+        logger.debug("Failed to register HKCU AppUserModelId '%s': %s", target_aumid, exc)
+        return False
 
 NOTIFICATION_CATEGORIES: Dict[str, Dict[str, str]] = {
     "task_completed": {
@@ -209,12 +266,9 @@ class NotificationService:
         return self._frozen_override if self._frozen_override is not None else is_frozen()
 
     def _get_app_user_model_id(self) -> str:
-        # In development mode (and packaged mode without a registered Start Menu shortcut AUMID),
-        # Windows PowerShell's built-in AUMID guarantees native toast delivery without requiring
-        # installer/registry modifications.
-        if self._is_frozen_mode():
-            return WINDOWS_POWERSHELL_AUMID
-        return WINDOWS_POWERSHELL_AUMID
+        # Use the single canonical desktop AppUserModelID across development, desktop shell,
+        # native toast notifications, and the Windows installer.
+        return get_canonical_app_user_model_id()
 
     def _resolve_profile_id(self, profile_id: Optional[str] = None) -> str:
         if profile_id and profile_id.strip():
@@ -299,9 +353,26 @@ class NotificationService:
 
     def is_ui_recently_active(self) -> bool:
         with self._lock:
-            if not self._ui_window_active or self._last_ui_activity_at <= 0.0:
+            ui_active = self._ui_window_active
+            last_at = self._last_ui_activity_at
+
+        if not ui_active:
+            return False
+
+        controller = get_shared_desktop_controller()
+        if controller is not None:
+            if controller.is_window_minimized:
                 return False
-            return (time.monotonic() - self._last_ui_activity_at) <= self.ACTIVE_UI_WINDOW_SECONDS
+            if controller.is_window_focused:
+                return True
+            native_fg = is_native_window_foreground(
+                getattr(controller, "title", "VoxPilot"),
+                hwnd_hint=getattr(controller, "_hwnd", None),
+            )
+            if native_fg is False:
+                return False
+
+        return last_at > 0.0 and (time.monotonic() - last_at) <= self.ACTIVE_UI_WINDOW_SECONDS
 
     def _is_duplicate_event(self, event_key: Optional[str]) -> bool:
         if not event_key:
@@ -320,21 +391,36 @@ class NotificationService:
 
     def _send_windows_toast(self, title: str, message: str, app_id: str) -> None:
         """Deliver a native Windows toast notification via PowerShell WinRT."""
+        ensure_windows_aumid_registered(app_id)
         xml_title = html.escape(title, quote=True)
         xml_body = html.escape(message, quote=True)
+        logo_path = resolve_toast_logo_path()
+        logo_xml = ""
+        if logo_path is not None:
+            escaped_logo = html.escape(str(logo_path), quote=True)
+            logo_xml = f'<image placement="appLogoOverride" src="{escaped_logo}" />'
+
+        ps_app_id = app_id.replace("'", "''")
+        ps_fallback_id = WINDOWS_POWERSHELL_AUMID.replace("'", "''")
+
         # Pass title/body via base64-encoded UTF-16LE PowerShell script to prevent any injection.
         ps_script = (
             "$ErrorActionPreference = 'Stop';\n"
             "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null;\n"
             "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null;\n"
             "$template = '<toast><visual><binding template=\"ToastGeneric\">"
-            f"<text>{xml_title}</text><text>{xml_body}</text>"
+            f"{logo_xml}<text>{xml_title}</text><text>{xml_body}</text>"
             "</binding></visual></toast>';\n"
             "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument;\n"
             "$xml.LoadXml($template);\n"
             "$toast = [Windows.UI.Notifications.ToastNotification]::new($xml);\n"
-            f"$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{app_id}');\n"
-            "$notifier.Show($toast);\n"
+            f"try {{\n"
+            f"  $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{ps_app_id}');\n"
+            f"  $notifier.Show($toast);\n"
+            f"}} catch {{\n"
+            f"  $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{ps_fallback_id}');\n"
+            f"  $notifier.Show($toast);\n"
+            f"}}\n"
         )
         encoded = base64.b64encode(ps_script.encode("utf-16le")).decode("ascii")
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)

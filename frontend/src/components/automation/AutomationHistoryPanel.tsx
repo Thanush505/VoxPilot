@@ -329,7 +329,7 @@ export const AutomationHistoryPanel: React.FC<AutomationHistoryPanelProps> = ({
                       {item.duration_ms !== null && item.duration_ms !== undefined ? ` • ${item.duration_ms}ms` : ''}
                     </div>
                     {item.error_summary && (
-                      <div className="text-xs" style={{ color: 'var(--color-danger)', marginTop: '0.2rem' }}>
+                      <div className="text-xs" style={{ color: 'var(--status-danger)', marginTop: '0.2rem' }}>
                         {item.error_summary}
                       </div>
                     )}
@@ -365,15 +365,15 @@ export const AutomationHistoryPanel: React.FC<AutomationHistoryPanelProps> = ({
                 </div>
 
                 {isExpanded && expandedExec && (
-                  <div style={{ marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px solid var(--border-color)', display: 'grid', gap: '0.35rem' }}>
+                  <div style={{ marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px solid var(--border-subtle)', display: 'grid', gap: '0.35rem' }}>
                     {expandedExec.steps.map((st) => (
-                      <div key={st.step_id} className="text-xs" style={{ padding: '0.35rem 0.5rem', borderRadius: '6px', border: '1px solid var(--border-color)' }}>
+                      <div key={st.step_id} className="text-xs" style={{ padding: '0.35rem 0.5rem', borderRadius: '6px', border: '1px solid var(--border-subtle)', background: 'var(--bg-elevated)' }}>
                         <div>
                           <strong>Step {st.step_index + 1}: {st.action}</strong> ({st.status})
                         </div>
                         {st.input_summary && <div className="text-muted">Input: {st.input_summary}</div>}
                         {st.output_summary && <div>Output: {st.output_summary}</div>}
-                        {st.error_summary && <div style={{ color: 'var(--color-danger)' }}>Error: {st.error_summary}</div>}
+                        {st.error_summary && <div style={{ color: 'var(--status-danger)' }}>Error: {st.error_summary}</div>}
                       </div>
                     ))}
                   </div>

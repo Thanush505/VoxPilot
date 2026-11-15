@@ -81,7 +81,7 @@ _OBVIOUS_SECRET_PATTERNS: List[Tuple[str, re.Pattern[str]]] = [
     (
         "auth_header_or_cookie",
         re.compile(
-            r"\b(?:authorization|x-api-key|set-cookie)\s*:\s*\S+",
+            r"\b(?:authorization|x-api-key|x-goog-api-key|x-voxpilot-desktop-token|set-cookie)\s*:\s*\S+",
             re.IGNORECASE,
         ),
     ),
@@ -145,6 +145,68 @@ def serialize_sanitized_json(data: Any) -> Optional[str]:
         return "{}"
 
 
+def normalize_plan_steps(raw_plan: Any) -> List[Dict[str, Any]]:
+    """Non-destructively normalize stored or in-memory plan steps into List[Dict[str, Any]]."""
+    if raw_plan is None:
+        return []
+    parsed = raw_plan
+    if isinstance(raw_plan, str):
+        text_val = raw_plan.strip()
+        if not text_val:
+            return []
+        try:
+            parsed = json.loads(text_val)
+        except Exception:
+            clean_text = scrub_text_secrets(text_val)
+            return [
+                {
+                    "step_index": 0,
+                    "action": "legacy_step",
+                    "description": clean_text,
+                    "parameters": {},
+                    "legacy_raw": clean_text,
+                }
+            ]
+
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    if not isinstance(parsed, (list, tuple)):
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for idx, item in enumerate(parsed):
+        if item is None:
+            continue
+        if isinstance(item, dict):
+            step_copy = dict(item)
+            if "parameters" in step_copy and not isinstance(step_copy["parameters"], dict):
+                step_copy["parameters"] = {"_legacy_value": step_copy["parameters"]}
+            normalized.append(step_copy)
+        elif isinstance(item, str):
+            clean_str = scrub_text_secrets(item)
+            normalized.append(
+                {
+                    "step_index": idx,
+                    "action": "legacy_step",
+                    "description": clean_str,
+                    "parameters": {},
+                    "legacy_raw": clean_str,
+                }
+            )
+        else:
+            clean_repr = scrub_text_secrets(str(item))
+            normalized.append(
+                {
+                    "step_index": idx,
+                    "action": "legacy_step",
+                    "description": clean_repr,
+                    "parameters": {},
+                    "legacy_raw": clean_repr,
+                }
+            )
+    return normalized
+
+
 # ==============================================================================
 # Persistent SQLModel Entities
 # ==============================================================================
@@ -168,7 +230,8 @@ class ExecutionStepRecord(SQLModel, table=True):
         if not self.parameters_json:
             return {}
         try:
-            return json.loads(self.parameters_json)
+            parsed = json.loads(self.parameters_json)
+            return parsed if isinstance(parsed, dict) else {"_legacy_value": parsed}
         except Exception:
             return {}
 
@@ -210,12 +273,7 @@ class ExecutionRecord(SQLModel, table=True):
     )
 
     def get_plan(self) -> List[Dict[str, Any]]:
-        if not self.plan_json:
-            return []
-        try:
-            return json.loads(self.plan_json)
-        except Exception:
-            return []
+        return normalize_plan_steps(self.plan_json)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -483,13 +541,11 @@ class AutomationRecord(SQLModel, table=True):
 
     def to_dict(self) -> Dict[str, Any]:
         try:
-            trigger_config = json.loads(self.trigger_config_json) if self.trigger_config_json else {}
+            parsed_cfg = json.loads(self.trigger_config_json) if self.trigger_config_json else {}
+            trigger_config = parsed_cfg if isinstance(parsed_cfg, dict) else {}
         except Exception:
             trigger_config = {}
-        try:
-            steps = json.loads(self.steps_json) if self.steps_json else []
-        except Exception:
-            steps = []
+        steps = normalize_plan_steps(self.steps_json)
         return {
             "automation_id": self.automation_id,
             "profile_id": self.profile_id,
@@ -533,7 +589,8 @@ class AutomationExecutionRecord(SQLModel, table=True):
 
     def to_dict(self) -> Dict[str, Any]:
         try:
-            pending_conf = json.loads(self.pending_confirmation_json) if self.pending_confirmation_json else None
+            parsed_conf = json.loads(self.pending_confirmation_json) if self.pending_confirmation_json else None
+            pending_conf = parsed_conf if isinstance(parsed_conf, dict) else None
         except Exception:
             pending_conf = None
         return {
@@ -611,7 +668,8 @@ class ProfileProviderConfigRecord(SQLModel, table=True):
 
     def to_dict(self) -> Dict[str, Any]:
         try:
-            extra_cfg = json.loads(self.config_json) if self.config_json else {}
+            parsed_cfg = json.loads(self.config_json) if self.config_json else {}
+            extra_cfg = parsed_cfg if isinstance(parsed_cfg, dict) else {}
         except Exception:
             extra_cfg = {}
         return {

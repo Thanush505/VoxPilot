@@ -1,11 +1,15 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
-  Bot,
   Plus,
   RefreshCw,
   AlertTriangle,
   Mic,
   MicOff,
+  FolderOpen,
+  Globe,
+  Mail,
+  Monitor,
+  Sparkles,
 } from 'lucide-react';
 import apiClient from '../api/client';
 import {
@@ -24,16 +28,106 @@ import ConversationList from '../components/agent/ConversationList';
 import ExecutionProgress from '../components/agent/ExecutionProgress';
 import EmailDraftPanel from '../components/agent/EmailDraftPanel';
 import EmptyState from '../components/common/EmptyState';
+import { useAICore } from '../context/AICoreContext';
+import { AIOrb } from '../components/aicore/AIOrb';
+import { AudioReactiveWaveform } from '../components/aicore/AudioReactiveWaveform';
+import { StatusPill } from '../components/ui/DesignSystem';
+
+export type AgentSpecialistMode = 'all' | 'voice' | 'files' | 'research' | 'email' | 'screen';
+
+interface SpecialistModeConfig {
+  id: AgentSpecialistMode;
+  label: string;
+  description: string;
+  prompts: string[];
+}
+
+const SPECIALIST_MODES: SpecialistModeConfig[] = [
+  {
+    id: 'all',
+    label: 'All Capabilities',
+    description: 'Unified LangGraph agent with system automation, files, research, email, and voice.',
+    prompts: [
+      'Check system hardware status',
+      'List running applications',
+      'Open Notepad and type a summary',
+    ],
+  },
+  {
+    id: 'voice',
+    label: 'Voice Assistant',
+    description: 'Hands-free Faster-Whisper STT, Streaming VAD, Push-to-Talk, and Piper TTS playback.',
+    prompts: [
+      'Check microphone and voice readiness',
+      'Summarize my current tasks aloud',
+      'Open Calculator by voice command',
+    ],
+  },
+  {
+    id: 'files',
+    label: 'File Assistant',
+    description: 'Safe workspace-scoped file inspection, summarization, organization, and creation.',
+    prompts: [
+      'List files in my Documents folder',
+      'Summarize workspace README.md key points',
+      'Create a structured meeting notes text file in Documents',
+    ],
+  },
+  {
+    id: 'research',
+    label: 'Browser Research',
+    description: 'Structured web research, page synthesis, and verifiable URL citations.',
+    prompts: [
+      'Research Python 3.13 key improvements and summarize',
+      'Search web for Windows 11 productivity shortcuts',
+      'Summarize https://github.com/Thanush505/VoxPilot',
+    ],
+  },
+  {
+    id: 'email',
+    label: 'Email Assistant',
+    description: 'Read unread inbox threads safely and compose editable drafts with explicit send approval.',
+    prompts: [
+      'Summarize my unread emails cleanly',
+      'Draft an email replying to the latest thread',
+      'Check inbox for urgent messages',
+    ],
+  },
+  {
+    id: 'screen',
+    label: 'Screen Vision',
+    description: 'On-demand ephemeral desktop capture analysis with automatic scrubbing after use.',
+    prompts: [
+      'What application is currently active on my screen?',
+      'Summarize visible text or errors on screen',
+      'Suggest next step for what I am viewing',
+    ],
+  },
+];
 
 interface AgentPageProps {
   onNavigateToConfirmations: () => void;
   isBackendConnected: boolean;
+  initialSpecialistMode?: AgentSpecialistMode;
+  initialPrompt?: string | null;
+  onConsumeInitialPrompt?: () => void;
 }
 
 export const AgentPage: React.FC<AgentPageProps> = ({
   onNavigateToConfirmations,
   isBackendConnected,
+  initialSpecialistMode = 'all',
+  initialPrompt = null,
+  onConsumeInitialPrompt,
 }) => {
+  const [specialistMode, setSpecialistMode] = useState<AgentSpecialistMode>(initialSpecialistMode);
+  const {
+    coreState,
+    coreLabel,
+    audioTelemetry,
+    isWindowVisible,
+    setAgentExecutionPhase,
+  } = useAICore();
   const [conversations, setConversations] = useState<ConversationInfo[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [activeEmailDraft, setActiveEmailDraft] = useState<EmailDraftItem | null>(null);
@@ -389,6 +483,10 @@ export const AgentPage: React.FC<AgentPageProps> = ({
 
     setIsLoading(true);
     setIsAnalyzingScreen(Boolean(attachedCapture));
+    setAgentExecutionPhase(
+      'thinking',
+      attachedCapture ? 'Analyzing captured screen context...' : `Processing "${userInput.slice(0, 48)}"...`
+    );
     if (attachedCapture) {
       setCapturedScreen(null);
     }
@@ -404,6 +502,13 @@ export const AgentPage: React.FC<AgentPageProps> = ({
       if (res.ok && res.data) {
         const exec = res.data;
         setActiveExecution(exec);
+        if (exec.execution_status === 'failed' || exec.execution_status === 'cancelled' || exec.execution_status === 'rate_limited') {
+          setAgentExecutionPhase('error', exec.error || 'Execution stopped or failed.');
+        } else if (exec.execution_status === 'confirmation_required') {
+          setAgentExecutionPhase('planning', 'Waiting for operator approval...');
+        } else {
+          setAgentExecutionPhase('completed', 'Response ready.');
+        }
         const maybeDraft = (exec.execution_results?.[0] as { draft?: EmailDraftItem } | undefined)?.draft;
         if (maybeDraft) {
           setActiveEmailDraft(maybeDraft);
@@ -457,6 +562,7 @@ export const AgentPage: React.FC<AgentPageProps> = ({
       } else {
         const errorText = res.error || 'Failed to execute command.';
         setErrorMsg(errorText);
+        setAgentExecutionPhase('error', errorText);
 
         const errorMsgObj: ChatMessageType = {
           id: `error-${Date.now()}`,
@@ -475,6 +581,7 @@ export const AgentPage: React.FC<AgentPageProps> = ({
     } catch (err: unknown) {
       const errorText = err instanceof Error ? err.message : 'Unknown execution failure.';
       setErrorMsg(errorText);
+      setAgentExecutionPhase('error', errorText);
 
       const errorMsgObj: ChatMessageType = {
         id: `error-${Date.now()}`,
@@ -495,11 +602,44 @@ export const AgentPage: React.FC<AgentPageProps> = ({
     }
   };
 
+  useEffect(() => {
+    setSpecialistMode(initialSpecialistMode);
+  }, [initialSpecialistMode]);
+
+  useEffect(() => {
+    if (initialPrompt && initialPrompt.trim() && isBackendConnected && !isLoading) {
+      const toSend = initialPrompt;
+      onConsumeInitialPrompt?.();
+      void handleSendMessage(toSend);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialPrompt, isBackendConnected]);
+
+  const activeSpecialist =
+    SPECIALIST_MODES.find((m) => m.id === specialistMode) || SPECIALIST_MODES[0];
+
   const isVoiceActive = voiceStatus?.is_active ?? false;
   const voicePhase: VoicePhase = voiceStatus?.phase ?? 'idle';
   const isRecording = voiceStatus?.is_recording ?? false;
   const voiceShortcut = voiceStatus?.shortcut_status?.shortcut || voiceStatus?.settings?.shortcut || 'Ctrl+Shift+V';
   const voiceError = voiceStatus?.last_error || null;
+
+  const renderModeIcon = (modeId: AgentSpecialistMode) => {
+    switch (modeId) {
+      case 'voice':
+        return <Mic size={13} />;
+      case 'files':
+        return <FolderOpen size={13} />;
+      case 'research':
+        return <Globe size={13} />;
+      case 'email':
+        return <Mail size={13} />;
+      case 'screen':
+        return <Monitor size={13} />;
+      default:
+        return <Sparkles size={13} />;
+    }
+  };
 
   return (
     <div className="agent-page-layout">
@@ -514,10 +654,44 @@ export const AgentPage: React.FC<AgentPageProps> = ({
 
       {/* Main Chat & Progression View */}
       <div className="chat-main-area">
+        {/* Specialist Workspace Mode Selector */}
+        <div className="vp-mode-tabs-bar" data-testid="agent-specialist-mode-bar">
+          <div className="vp-mode-tabs-list" role="tablist" aria-label="Specialist Workspace Modes">
+            {SPECIALIST_MODES.map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                role="tab"
+                aria-selected={specialistMode === m.id}
+                data-testid={`agent-mode-${m.id}`}
+                className={`vp-mode-tab-btn ${specialistMode === m.id ? 'is-active' : ''}`}
+                onClick={() => setSpecialistMode(m.id)}
+              >
+                {renderModeIcon(m.id)}
+                <span>{m.label}</span>
+              </button>
+            ))}
+          </div>
+          <StatusPill
+            variant={coreState === 'error' ? 'danger' : coreState === 'listening' ? 'success' : 'accent'}
+            showDot
+            testId="agent-ai-core-pill"
+          >
+            AI Core: {coreLabel}
+          </StatusPill>
+        </div>
+
         {/* Chat Header Toolbar */}
         <div className="chat-header-bar">
           <div className="chat-header-info">
-            <Bot size={18} className="text-accent-blue" />
+            <AIOrb
+              state={coreState}
+              size="sm"
+              rmsLevel={audioTelemetry.rms_level}
+              isWindowVisible={isWindowVisible}
+              onClick={handleToggleVoiceMode}
+              ariaLabel="AI Core Orb — Toggle Voice Mode"
+            />
             <div>
               <h2 className="chat-session-title">
                 {currentConversationId
@@ -527,12 +701,18 @@ export const AgentPage: React.FC<AgentPageProps> = ({
               <span className="chat-session-subtitle">
                 {activeProvider?.profile_config?.active_provider_id === 'byok' ? (
                   <>
-                    BYOK (OpenAI • {activeProvider.profile_config.byok_model || 'gpt-4o-mini'}) •{' '}
-                    <span className="text-amber-600 dark:text-amber-400 font-medium">
+                    BYOK (
+                    {activeProvider.profile_config.byok_vendor === 'anthropic'
+                      ? 'Anthropic Claude'
+                      : activeProvider.profile_config.byok_vendor === 'google'
+                        ? 'Google Gemini'
+                        : 'OpenAI'}{' '}
+                    • {activeProvider.profile_config.byok_model || 'default'}) •{' '}
+                    <span className="vp-inline-badge vp-inline-badge--accent">
                       External AI
                     </span>
                     {!activeProvider.health?.available && (
-                      <span className="text-rose-600 dark:text-rose-400">
+                      <span className="vp-inline-badge" style={{ color: 'var(--status-danger)' }}>
                         {' '}• {activeProvider.health?.reason || 'Unavailable'}
                       </span>
                     )}
@@ -584,6 +764,45 @@ export const AgentPage: React.FC<AgentPageProps> = ({
           </div>
         </div>
 
+        {/* Dedicated Voice / Specialist Contextual Dock */}
+        {(specialistMode !== 'all' || isVoiceActive || isRecording || voiceStatus?.is_ptt_active) && (
+          <div className="vp-specialist-banner" data-testid={`specialist-panel-${specialistMode}`}>
+            <div style={{ flex: 1, minWidth: 240 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+                {activeSpecialist.label}
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
+                {activeSpecialist.description}
+              </div>
+              {specialistMode !== 'voice' && (
+                <div className="vp-specialist-prompts" style={{ marginTop: 8 }}>
+                  {activeSpecialist.prompts.map((prompt) => (
+                    <button
+                      key={prompt}
+                      type="button"
+                      className="vp-chip-btn"
+                      disabled={!isBackendConnected || isLoading}
+                      onClick={() => handleSendMessage(prompt)}
+                    >
+                      {prompt}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {(specialistMode === 'voice' || isVoiceActive || isRecording || voiceStatus?.is_ptt_active) && (
+              <div style={{ minWidth: 260, flex: '0 1 340px' }}>
+                <AudioReactiveWaveform
+                  telemetry={audioTelemetry}
+                  isWindowVisible={isWindowVisible}
+                  compact
+                />
+              </div>
+            )}
+          </div>
+        )}
+
         {/* In-Flight Execution Progress Tracker */}
         {activeExecution && (
           <div className="chat-progress-banner">
@@ -596,23 +815,26 @@ export const AgentPage: React.FC<AgentPageProps> = ({
           {!isBackendConnected && (
             <div className="chat-offline-banner">
               <AlertTriangle size={15} />
-              <span>Backend disconnected. Ensure FastAPI is running on http://127.0.0.1:8000.</span>
+              <span>Backend disconnected. Ensure FastAPI is running on {apiClient.getBaseUrl()}.</span>
             </div>
           )}
 
           {activeMessages.length === 0 ? (
             <div className="agent-empty-workspace">
               <EmptyState
-                icon={<Bot size={32} />}
-                title="VoxPilot Desktop Agent Ready"
-                description={`Type a command, click the microphone button, or press ${voiceShortcut} anywhere in Windows to speak to VoxPilot.`}
+                icon={
+                  <AIOrb
+                    state={coreState}
+                    size="md"
+                    rmsLevel={audioTelemetry.rms_level}
+                    isWindowVisible={isWindowVisible}
+                  />
+                }
+                title={`VoxPilot ${activeSpecialist.label}`}
+                description={`${activeSpecialist.description} Press ${voiceShortcut} anywhere in Windows to talk hands-free.`}
               />
               <div className="agent-quick-prompts" aria-label="Suggested commands">
-                {[
-                  'Check system hardware status',
-                  'List running applications',
-                  'Open Notepad and type a summary',
-                ].map((prompt) => (
+                {activeSpecialist.prompts.map((prompt) => (
                   <button
                     key={prompt}
                     type="button"

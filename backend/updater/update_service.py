@@ -1244,8 +1244,34 @@ class UpdateService:
             current_pid = os.getpid() if shutdown_app else 0
             host = os.environ.get("VOXPILOT_HOST", "127.0.0.1")
             port = os.environ.get("VOXPILOT_PORT", "8000")
+            try:
+                from backend.desktop.shell import get_shared_desktop_controller
+
+                desktop_controller = get_shared_desktop_controller()
+                if desktop_controller is not None:
+                    host = str(getattr(desktop_controller, "host", host) or host)
+                    port = str(getattr(desktop_controller, "port", port) or port)
+            except Exception:
+                pass
             health_url = f"http://{host}:{port}/health" if relaunch else ""
             session_id = f"upd_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{os.getpid()}"
+
+            # Create a verified pre-update SQLite/config/credential snapshot when running against user data
+            try:
+                from backend.database.backup import DatabaseBackupManager
+                from backend.paths import get_database_path, get_updates_dir
+
+                if self.updates_dir.resolve() == get_updates_dir().resolve() and get_database_path().is_file():
+                    backup_manifest = DatabaseBackupManager().create_backup(
+                        label=f"pre_update_v{target_version}"
+                    )
+                    logger.info(
+                        "Created pre-update backup before v%s install at '%s'.",
+                        target_version,
+                        backup_manifest.get("backup_dir"),
+                    )
+            except Exception as exc:
+                logger.warning("Pre-update backup skipped or failed cleanly before v%s update: %s", target_version, exc)
 
             # Generate the external PowerShell updater helper inside %LOCALAPPDATA%\VoxPilot\updates
             ps_script = generate_powershell_updater_script(
@@ -1324,7 +1350,24 @@ class UpdateService:
             else:
                 def _delayed_shutdown() -> None:
                     import signal
-                    time.sleep(0.8)
+                    time.sleep(0.6)
+                    controller = None
+                    try:
+                        from backend.desktop.shell import get_shared_desktop_controller
+
+                        controller = get_shared_desktop_controller()
+                    except Exception:
+                        controller = None
+
+                    if controller is not None:
+                        try:
+                            controller.request_shutdown()
+                        except Exception as exc:
+                            logger.warning("Desktop shell graceful shutdown raised an error: %s", exc)
+                        time.sleep(1.5)
+                    else:
+                        time.sleep(0.2)
+
                     try:
                         os.kill(os.getpid(), signal.SIGTERM)
                     except Exception:
@@ -1332,7 +1375,11 @@ class UpdateService:
                     time.sleep(2.5)
                     os._exit(0)
 
-                threading.Thread(target=_delayed_shutdown, daemon=True).start()
+                threading.Thread(
+                    target=_delayed_shutdown,
+                    daemon=True,
+                    name="VoxPilotUpdateShutdown",
+                ).start()
 
         return payload
 

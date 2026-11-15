@@ -10,6 +10,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from backend.ai.providers.anthropic_adapter import (
+    AnthropicBYOKAdapter,
+    DEFAULT_ANTHROPIC_MODEL,
+)
 from backend.ai.providers.base import (
     AIProvider,
     AIProviderRequest,
@@ -24,13 +28,18 @@ from backend.ai.providers.base import (
     ProviderNotConfiguredError,
     assert_no_plaintext_secrets,
 )
+from backend.ai.providers.gemini_adapter import (
+    DEFAULT_GEMINI_MODEL,
+    GeminiBYOKAdapter,
+)
 from backend.ai.providers.openai_adapter import DEFAULT_OPENAI_MODEL, OpenAIBYOKAdapter
 
 SUPPORTED_BYOK_VENDORS = ("openai", "anthropic", "google", "openai_compatible")
+CONFIGURABLE_BYOK_VENDORS = ("openai", "anthropic", "google")
 
 
 class BYOKProvider(AIProvider):
-    """Bring-Your-Own-Key provider adapter (OpenAI supported in Phase 8B)."""
+    """Bring-Your-Own-Key provider adapter (OpenAI, Anthropic Claude, Google Gemini)."""
 
     provider_id = PROVIDER_BYOK
     display_name = "BYOK (Bring Your Own Key)"
@@ -46,9 +55,34 @@ class BYOKProvider(AIProvider):
         self,
         credential_store: Optional[CredentialStoreInterface] = None,
         openai_adapter: Optional[OpenAIBYOKAdapter] = None,
+        anthropic_adapter: Optional[AnthropicBYOKAdapter] = None,
+        gemini_adapter: Optional[GeminiBYOKAdapter] = None,
     ) -> None:
         self._credential_store = credential_store
         self._openai_adapter = openai_adapter or OpenAIBYOKAdapter()
+        self._anthropic_adapter = anthropic_adapter or AnthropicBYOKAdapter()
+        self._gemini_adapter = gemini_adapter or GeminiBYOKAdapter()
+        self._adapters = {
+            "openai": self._openai_adapter,
+            "anthropic": self._anthropic_adapter,
+            "google": self._gemini_adapter,
+        }
+        self._default_models = {
+            "openai": DEFAULT_OPENAI_MODEL,
+            "anthropic": DEFAULT_ANTHROPIC_MODEL,
+            "google": DEFAULT_GEMINI_MODEL,
+        }
+
+    def get_vendor_adapter(self, vendor: str):
+        return self._adapters.get((vendor or "").strip().lower())
+
+    def get_capabilities(self, config: Optional[Dict[str, Any]] = None) -> ProviderCapabilities:
+        clean = self.validate_config(config)
+        vendor = clean.get("byok_vendor")
+        adapter = self._adapters.get(vendor or "")
+        if adapter is not None:
+            return adapter.capabilities
+        return self.capabilities
 
     def validate_config(self, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         assert_no_plaintext_secrets(config)
@@ -73,7 +107,7 @@ class BYOKProvider(AIProvider):
         vendor = clean.get("byok_vendor")
         cred_ref = clean.get("byok_credential_ref")
         profile_id = str((config or {}).get("profile_id") or "default").strip() or "default"
-        model = clean.get("byok_model") or (DEFAULT_OPENAI_MODEL if vendor == "openai" else None)
+        model = clean.get("byok_model") or self._default_models.get(vendor or "")
 
         if not vendor or not cred_ref:
             return ProviderHealth(
@@ -85,7 +119,8 @@ class BYOKProvider(AIProvider):
                 active_model=model,
             )
 
-        if vendor != "openai":
+        adapter = self._adapters.get(vendor)
+        if adapter is None:
             return ProviderHealth(
                 provider_id=self.provider_id,
                 available=False,
@@ -101,7 +136,7 @@ class BYOKProvider(AIProvider):
                 available=False,
                 configured=False,
                 status="not_configured",
-                reason="Encrypted OpenAI API key is missing for this profile.",
+                reason=f"Encrypted {adapter.display_name} API key is missing for this profile.",
                 active_model=model,
             )
 
@@ -110,15 +145,18 @@ class BYOKProvider(AIProvider):
             available=True,
             configured=True,
             status="ready",
-            reason="OpenAI BYOK credential configured.",
+            reason=f"{adapter.display_name} credential configured.",
             active_model=model,
         )
 
     def list_models(self, config: Optional[Dict[str, Any]] = None) -> List[ProviderModelInfo]:
         clean = self.validate_config(config)
         vendor = clean.get("byok_vendor")
-        if vendor in (None, "openai"):
+        if vendor is None:
             return self._openai_adapter.list_models()
+        adapter = self._adapters.get(vendor)
+        if adapter is not None:
+            return adapter.list_models()
         return []
 
     def generate(
@@ -135,7 +173,8 @@ class BYOKProvider(AIProvider):
             raise ProviderNotConfiguredError(
                 "BYOK provider is not configured with an encrypted credential for this profile."
             )
-        if vendor != "openai":
+        adapter = self._adapters.get(vendor)
+        if adapter is None:
             raise ProviderNotConfiguredError(
                 f"BYOK vendor '{vendor}' is not yet supported."
             )
@@ -143,10 +182,10 @@ class BYOKProvider(AIProvider):
         api_key = self._credential_store.resolve_credential(profile_id, cred_ref)
         if not api_key:
             raise ProviderNotConfiguredError(
-                "Encrypted OpenAI API key is missing for this profile."
+                f"Encrypted {adapter.display_name} API key is missing for this profile."
             )
 
-        return self._openai_adapter.generate(
+        return adapter.generate(
             request,
             api_key=api_key,
             model=clean.get("byok_model"),

@@ -219,7 +219,7 @@ export const CustomAutomationBuilder: React.FC<CustomAutomationBuilderProps> = (
 
         {/* Preview & Edit Panel */}
         {preview && (
-          <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid var(--border-color)' }} data-testid="automation-preview-panel">
+          <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid var(--border-subtle)' }} data-testid="automation-preview-panel">
             <div style={{ display: 'grid', gap: '0.75rem' }}>
               <div>
                 <label style={{ fontSize: '0.82rem', fontWeight: 600 }}>Automation Name</label>
@@ -228,7 +228,8 @@ export const CustomAutomationBuilder: React.FC<CustomAutomationBuilderProps> = (
                   value={draftName}
                   onChange={(e) => setDraftName(e.target.value)}
                   data-testid="automation-draft-name"
-                  style={{ width: '100%', padding: '0.45rem 0.65rem', marginTop: '0.25rem', borderRadius: '6px' }}
+                  className="vp-provider-input"
+                  style={{ marginTop: '0.25rem' }}
                 />
               </div>
 
@@ -320,7 +321,8 @@ export const CustomAutomationBuilder: React.FC<CustomAutomationBuilderProps> = (
                         alignItems: 'center',
                         padding: '0.45rem 0.65rem',
                         borderRadius: '6px',
-                        border: '1px solid var(--border-color)',
+                        border: '1px solid var(--border-subtle)',
+                        background: 'var(--bg-elevated)',
                       }}
                     >
                       <div>
@@ -379,7 +381,7 @@ export const CustomAutomationBuilder: React.FC<CustomAutomationBuilderProps> = (
               </button>
             )}
           </div>
-          {activeExec.error && <p className="text-xs" style={{ color: 'var(--color-danger)' }}>{activeExec.error}</p>}
+          {activeExec.error && <p className="text-xs" style={{ color: 'var(--status-danger)' }}>{activeExec.error}</p>}
           <div style={{ display: 'grid', gap: '0.25rem' }}>
             {activeExec.steps.map((st) => (
               <div key={st.step_id} className="text-xs">

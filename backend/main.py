@@ -3,13 +3,15 @@ VoxPilot - Main FastAPI Application
 Entry point for the VoxPilot Desktop Control Agent REST and WebSocket APIs.
 """
 
+import html
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import Depends, FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
+from backend.desktop.shell import get_shared_desktop_controller
 from backend.api.agent import router as agent_router
 from backend.api.memory import api_memory_router, agent_memory_router
 from backend.api.personalization import api_personalization_router, agent_personalization_router
@@ -73,36 +75,93 @@ app.add_middleware(
         "http://localhost:8000",
         "http://127.0.0.1:8000",
     ],
+    allow_origin_regex=r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "OPTIONS", "DELETE"],
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
 )
 
+def _require_trusted_api_request(request: Request) -> None:
+    """Enforce desktop session token and loopback Origin policy on all API routers."""
+    from backend.api.agent import _verify_trusted_request
+
+    path = request.url.path.rstrip("/")
+    require_token = path not in ("/api/system/desktop/focus", "/agent/system/desktop/focus")
+    _verify_trusted_request(request, require_desktop_token=require_token)
+
+
+_api_router_dependencies = [Depends(_require_trusted_api_request)]
+
 # Include API routers
-app.include_router(agent_router)
-app.include_router(api_memory_router)
-app.include_router(agent_memory_router)
-app.include_router(api_personalization_router)
-app.include_router(agent_personalization_router)
-app.include_router(api_profiles_router)
-app.include_router(agent_profiles_router)
-app.include_router(api_screen_router)
-app.include_router(agent_screen_router)
-app.include_router(api_system_router)
-app.include_router(agent_system_router)
-app.include_router(api_updates_router)
-app.include_router(agent_updates_router)
-app.include_router(api_email_router)
-app.include_router(api_automations_router)
-app.include_router(agent_automations_router)
-app.include_router(api_providers_router)
-app.include_router(agent_providers_router)
+app.include_router(agent_router, dependencies=_api_router_dependencies)
+app.include_router(api_memory_router, dependencies=_api_router_dependencies)
+app.include_router(agent_memory_router, dependencies=_api_router_dependencies)
+app.include_router(api_personalization_router, dependencies=_api_router_dependencies)
+app.include_router(agent_personalization_router, dependencies=_api_router_dependencies)
+app.include_router(api_profiles_router, dependencies=_api_router_dependencies)
+app.include_router(agent_profiles_router, dependencies=_api_router_dependencies)
+app.include_router(api_screen_router, dependencies=_api_router_dependencies)
+app.include_router(agent_screen_router, dependencies=_api_router_dependencies)
+app.include_router(api_system_router, dependencies=_api_router_dependencies)
+app.include_router(agent_system_router, dependencies=_api_router_dependencies)
+app.include_router(api_updates_router, dependencies=_api_router_dependencies)
+app.include_router(agent_updates_router, dependencies=_api_router_dependencies)
+app.include_router(api_email_router, dependencies=_api_router_dependencies)
+app.include_router(api_automations_router, dependencies=_api_router_dependencies)
+app.include_router(agent_automations_router, dependencies=_api_router_dependencies)
+app.include_router(api_providers_router, dependencies=_api_router_dependencies)
+app.include_router(agent_providers_router, dependencies=_api_router_dependencies)
 
 # Mount frontend static assets if available
 _frontend_dist = get_frontend_dist_dir()
 if _frontend_dist.exists() and (_frontend_dist / "assets").is_dir():
     app.mount("/assets", StaticFiles(directory=str(_frontend_dist / "assets")), name="frontend_assets")
+
+
+import re as _re
+
+
+def _is_loopback_origin(origin: str) -> bool:
+    return bool(_re.match(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?(/|$)", origin.strip().lower()))
+
+
+def _inject_desktop_token_meta(html_text: str, token: str) -> str:
+    escaped = html.escape(token, quote=True)
+    meta_tag = f'<meta name="voxpilot-desktop-token" content="{escaped}" />'
+    head_match = _re.search(r"<head(?:\s[^>]*)?>", html_text, flags=_re.IGNORECASE)
+    if head_match:
+        idx = head_match.end()
+        return f"{html_text[:idx]}\n    {meta_tag}{html_text[idx:]}"
+    return f"{meta_tag}\n{html_text}"
+
+
+def _serve_spa_index(request: Request, index_file: Path):
+    """Serve SPA index.html; inject scoped desktop session token only for trusted desktop requests."""
+    controller = get_shared_desktop_controller()
+    if controller is None:
+        return FileResponse(str(index_file))
+
+    origin = (request.headers.get("origin") or "").strip()
+    sec_fetch_site = (request.headers.get("sec-fetch-site") or "").strip().lower()
+    trusted_origin = not origin or _is_loopback_origin(origin)
+    trusted_fetch_site = sec_fetch_site in ("", "none", "same-origin")
+
+    html_text = index_file.read_text(encoding="utf-8")
+    if trusted_origin and trusted_fetch_site and getattr(controller, "require_session_token", True):
+        html_text = _inject_desktop_token_meta(html_text, controller.session_token)
+
+    return HTMLResponse(
+        content=html_text,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Referrer-Policy": "no-referrer",
+            "X-Frame-Options": "DENY",
+            "Content-Security-Policy": "frame-ancestors 'none'",
+            "Vary": "Origin, Sec-Fetch-Site",
+        },
+    )
 
 
 @app.get("/", tags=["system"])
@@ -111,7 +170,7 @@ def read_root(request: Request):
     accept = request.headers.get("accept", "").lower()
     index_file = _frontend_dist / "index.html"
     if "text/html" in accept and index_file.exists():
-        return FileResponse(str(index_file))
+        return _serve_spa_index(request, index_file)
 
     return {
         "app": "VoxPilot Agent API",
@@ -137,13 +196,15 @@ async def catch_all_spa(request: Request, full_path: str):
         raise HTTPException(status_code=404, detail="API route not found")
 
     target_file = _frontend_dist / full_path
+    if full_path == "index.html" and target_file.is_file():
+        return _serve_spa_index(request, target_file)
     if full_path and target_file.is_file():
         return FileResponse(str(target_file))
 
     index_file = _frontend_dist / "index.html"
     accept = request.headers.get("accept", "").lower()
     if ("text/html" in accept or "*/*" in accept) and index_file.exists():
-        return FileResponse(str(index_file))
+        return _serve_spa_index(request, index_file)
 
     raise HTTPException(status_code=404, detail=f"Path not found: /{full_path}")
 

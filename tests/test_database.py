@@ -53,6 +53,12 @@ def repo(temp_db_path: Path):
         sync_engine=sync_engine,
     )
     yield repository
+    import asyncio
+
+    try:
+        asyncio.run(async_engine.dispose())
+    except Exception:
+        pass
     sync_engine.dispose()
 
 

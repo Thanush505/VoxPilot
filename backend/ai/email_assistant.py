@@ -50,6 +50,7 @@ from backend.automation.confirmation_manager import (
     get_shared_confirmation_manager,
 )
 from backend.automation.emergency_stop import get_shared_emergency_stop_manager
+from backend.paths import get_credentials_dir
 
 logger = logging.getLogger(__name__)
 
@@ -270,8 +271,10 @@ class DPAPICredentialStore:
     def __init__(self, storage_dir: Optional[Path] = None):
         if storage_dir is not None:
             self.storage_dir = Path(storage_dir)
+            self._legacy_dir: Optional[Path] = None
         else:
-            self.storage_dir = Path(__file__).resolve().parents[1] / "data" / "email_profiles"
+            self.storage_dir = get_credentials_dir() / "email_profiles"
+            self._legacy_dir = Path(__file__).resolve().parents[1] / "data" / "email_profiles"
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -281,6 +284,16 @@ class DPAPICredentialStore:
 
     def _profile_path(self, profile_id: str) -> Path:
         return self.storage_dir / self._safe_profile_filename(profile_id)
+
+    def _read_profile_path(self, profile_id: str) -> Path:
+        primary = self._profile_path(profile_id)
+        if primary.exists():
+            return primary
+        if self._legacy_dir is not None:
+            legacy = self._legacy_dir / self._safe_profile_filename(profile_id)
+            if legacy.exists():
+                return legacy
+        return primary
 
     @staticmethod
     def protect_secret(secret: str) -> str:
@@ -340,11 +353,14 @@ class DPAPICredentialStore:
             "authorized_by_user": True,
             "dpapi_secret": protected,
         }
-        self._profile_path(config.profile_id).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        target_path = self._profile_path(config.profile_id)
+        tmp_path = target_path.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(tmp_path, target_path)
         logger.info("Saved DPAPI-protected email account config for profile='%s'", config.profile_id)
 
     def load_account(self, profile_id: str) -> Tuple[EmailAccountConfig, str]:
-        path = self._profile_path(profile_id)
+        path = self._read_profile_path(profile_id)
         if not path.exists():
             raise EmailNotConfiguredError(
                 f"No email account is connected for profile '{profile_id}'. "
@@ -366,7 +382,7 @@ class DPAPICredentialStore:
         return cfg, secret
 
     def get_public_account(self, profile_id: str) -> Optional[EmailAccountConfig]:
-        path = self._profile_path(profile_id)
+        path = self._read_profile_path(profile_id)
         if not path.exists():
             return None
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -383,9 +399,17 @@ class DPAPICredentialStore:
         )
 
     def delete_account(self, profile_id: str) -> bool:
+        deleted = False
         path = self._profile_path(profile_id)
         if path.exists():
             path.unlink()
+            deleted = True
+        if self._legacy_dir is not None:
+            legacy = self._legacy_dir / self._safe_profile_filename(profile_id)
+            if legacy.exists():
+                legacy.unlink()
+                deleted = True
+        if deleted:
             logger.info("Deleted email account config for profile='%s'", profile_id)
             return True
         return False

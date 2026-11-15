@@ -21,10 +21,16 @@ from backend.paths import (
     get_export_dir,
     get_log_dir,
     get_config_dir,
+    get_credentials_dir,
+    get_backups_dir,
+    get_screenshots_dir,
+    get_downloads_dir,
+    get_webview_storage_dir,
     get_voice_temp_dir,
     get_frontend_dist_dir,
     get_piper_model_path,
     get_app_icon_path,
+    get_runtime_paths_summary,
     ensure_user_directories,
 )
 
@@ -176,13 +182,48 @@ def test_get_piper_model_path_env_override(monkeypatch, tmp_path):
 
 
 def test_ensure_user_directories(monkeypatch, tmp_path):
-    """ensure_user_directories creates all required subdirectories."""
+    """ensure_user_directories creates all required subdirectories including credentials and backups."""
     custom_root = tmp_path / "user_data"
     monkeypatch.setenv("VOXPILOT_USER_DATA_DIR", str(custom_root))
+    for var in (
+        "VOXPILOT_CONFIG_DIR",
+        "VOXPILOT_CREDENTIALS_DIR",
+        "VOXPILOT_BACKUP_DIR",
+        "VOXPILOT_SCREENSHOT_DIR",
+        "VOXPILOT_DOWNLOAD_DIR",
+        "VOXPILOT_WEBVIEW_DIR",
+        "VOXPILOT_LOG_DIR",
+        "VOXPILOT_EXPORT_DIR",
+        "VOXPILOT_UPDATES_DIR",
+        "VOXPILOT_DB_PATH",
+    ):
+        monkeypatch.delenv(var, raising=False)
 
     ensure_user_directories()
-    for sub in ("data", "logs", "exports", "screenshots", "downloads", "config", "temp/voice"):
+    for sub in (
+        "data",
+        "logs",
+        "exports",
+        "screenshots",
+        "downloads",
+        "config",
+        "credentials",
+        "backups",
+        "updates",
+        "webview",
+        "temp/voice",
+    ):
         assert (custom_root / sub).is_dir()
+
+    summary = get_runtime_paths_summary()
+    assert Path(summary["credentials_dir"]) == (custom_root / "credentials").resolve()
+    assert Path(summary["backups_dir"]) == (custom_root / "backups").resolve()
+    assert Path(summary["webview_storage_dir"]) == (custom_root / "webview").resolve()
+    assert get_credentials_dir() == (custom_root / "credentials").resolve()
+    assert get_backups_dir() == (custom_root / "backups").resolve()
+    assert get_screenshots_dir() == (custom_root / "screenshots").resolve()
+    assert get_downloads_dir() == (custom_root / "downloads").resolve()
+    assert get_webview_storage_dir() == (custom_root / "webview").resolve()
 
 
 def test_get_app_icon_path_exists_and_valid():

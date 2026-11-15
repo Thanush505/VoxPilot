@@ -14,10 +14,11 @@ from typing import Dict, Any, Optional, List
 from pathlib import Path
 import anyio
 from fastapi import APIRouter, HTTPException, Query, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from backend.agent.graph import VoxPilotAgent
 from backend.agent.state import VoxPilotState
+from backend.database.models import normalize_plan_steps
 from backend.database.repository import DatabaseRepository
 from backend.automation.confirmation_manager import (
     InvalidConfirmationError,
@@ -192,6 +193,24 @@ class ExecutionStatusResponse(BaseModel):
     replan_count: int = 0
     replan_history: List[Dict[str, Any]] = Field(default_factory=list)
 
+    @field_validator("plan", mode="before")
+    @classmethod
+    def _validate_plan_list(cls, v: Any) -> List[Dict[str, Any]]:
+        return normalize_plan_steps(v)
+
+    @field_validator("execution_results", "completed_steps", "failed_steps", "replan_history", mode="before")
+    @classmethod
+    def _validate_dict_lists(cls, v: Any) -> List[Dict[str, Any]]:
+        if not v or not isinstance(v, (list, tuple)):
+            return []
+        out: List[Dict[str, Any]] = []
+        for idx, item in enumerate(v):
+            if isinstance(item, dict):
+                out.append(item)
+            elif item is not None:
+                out.append({"step_index": idx, "message": str(item)})
+        return out
+
 
 class ConversationInfo(BaseModel):
     conversation_id: str
@@ -222,24 +241,41 @@ class ToolInfo(BaseModel):
 # Security Helpers (CSRF & Origin Verification)
 # ==============================================================================
 
-def _verify_trusted_request(request: Request) -> None:
-    """Verify that incoming requests to sensitive confirmation endpoints do not originate
-    from untrusted cross-origin browser sites (CSRF protection for local desktop daemon).
+def _verify_trusted_request(request: Request, require_desktop_token: bool = True) -> None:
+    """Verify that incoming requests originate from trusted local loopback
+    origins and, when running under an active desktop shell, present the
+    desktop session token in ``X-VoxPilot-Desktop-Token``.
     """
+    import re
+    import secrets
+    from backend.desktop.shell import get_shared_desktop_controller
+
     origin = request.headers.get("origin")
     if origin:
         origin_clean = origin.lower().strip()
-        allowed = (
-            origin_clean.startswith("http://localhost")
-            or origin_clean.startswith("https://localhost")
-            or origin_clean.startswith("http://127.0.0.1")
-            or origin_clean.startswith("https://127.0.0.1")
-        )
+        allowed = bool(re.match(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?(/|$)", origin_clean))
         if not allowed:
             logger.warning(f"Blocked cross-origin confirmation attempt from untrusted origin: {origin}")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Cross-origin requests from origin '{origin}' are forbidden.",
+            )
+
+    desktop_token = request.headers.get("x-voxpilot-desktop-token")
+    controller = get_shared_desktop_controller()
+    if controller is not None and getattr(controller, "require_session_token", True):
+        if require_desktop_token:
+            if not desktop_token or not secrets.compare_digest(desktop_token, controller.session_token):
+                logger.warning("Blocked API request without valid desktop session token.")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Missing or invalid desktop session token.",
+                )
+        elif desktop_token and not secrets.compare_digest(desktop_token, controller.session_token):
+            logger.warning("Blocked desktop focus request with invalid desktop session token.")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid desktop session token.",
             )
 
 
@@ -257,8 +293,9 @@ def _resolve_api_profile_id(agent: VoxPilotAgent, explicit_profile_id: Optional[
 
 
 @router.post("/execute", response_model=ExecutionStatusResponse)
-async def execute_request(request: ExecuteRequest):
+async def execute_request(request: ExecuteRequest, http_request: Request):
     """Execute a user natural language command through the LangGraph agent workflow."""
+    _verify_trusted_request(http_request)
     if not request.user_input or not request.user_input.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -439,20 +476,42 @@ async def list_conversation_executions(
     )
     results = []
     for r in records:
-        results.append(
-            ExecutionStatusResponse(
-                execution_id=r.execution_id,
-                conversation_id=r.conversation_id,
-                execution_status=r.execution_status,
-                user_input=r.user_input,
-                intent=r.intent,
-                plan=r.get_plan(),
-                response=r.response,
-                error=r.error,
-                requires_confirmation=False,
-                pending_confirmation=None,
+        try:
+            results.append(
+                ExecutionStatusResponse(
+                    execution_id=r.execution_id,
+                    conversation_id=r.conversation_id,
+                    execution_status=r.execution_status,
+                    user_input=r.user_input,
+                    intent=r.intent,
+                    plan=r.get_plan(),
+                    response=r.response,
+                    error=r.error,
+                    requires_confirmation=False,
+                    pending_confirmation=None,
+                )
             )
-        )
+        except Exception as rec_err:
+            logger.warning(
+                "Recovered malformed execution record '%s' in conversation '%s': %s",
+                getattr(r, "execution_id", "unknown"),
+                conversation_id,
+                rec_err,
+            )
+            results.append(
+                ExecutionStatusResponse(
+                    execution_id=str(getattr(r, "execution_id", "") or "unknown"),
+                    conversation_id=str(getattr(r, "conversation_id", conversation_id) or conversation_id),
+                    execution_status=str(getattr(r, "execution_status", "completed") or "completed"),
+                    user_input=str(getattr(r, "user_input", "") or ""),
+                    intent=getattr(r, "intent", None),
+                    plan=[],
+                    response=getattr(r, "response", None),
+                    error=getattr(r, "error", None),
+                    requires_confirmation=False,
+                    pending_confirmation=None,
+                )
+            )
     return results
 
 

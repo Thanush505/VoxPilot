@@ -1,13 +1,29 @@
-import React from 'react';
-import { Server, Bot, ShieldCheck, ShieldAlert } from 'lucide-react';
+import React, { useState } from 'react';
+import {
+  Server,
+  Bot,
+  ShieldCheck,
+  ShieldAlert,
+  Send,
+  Mic,
+  FolderOpen,
+  Globe,
+  Mail,
+  AppWindow,
+  Cpu,
+} from 'lucide-react';
 import { BackendConnectionState } from '../hooks/useBackendHealth';
 import { HealthResponse, EmergencyStopStatus } from '../api/types';
+import apiClient from '../api/client';
 import StatusCard from '../components/dashboard/StatusCard';
 import BackendStatus from '../components/dashboard/BackendStatus';
 import SystemOverview from '../components/dashboard/SystemOverview';
 import RecentActivity from '../components/dashboard/RecentActivity';
 import EmergencyStopPanel from '../components/safety/EmergencyStopPanel';
 import ErrorState from '../components/common/ErrorState';
+import { AICoreHeroCard } from '../components/aicore/AICoreHeroCard';
+import { useAICore } from '../context/AICoreContext';
+import type { AgentSpecialistMode } from './AgentPage';
 
 interface DashboardPageProps {
   connectionState: BackendConnectionState;
@@ -17,6 +33,8 @@ interface DashboardPageProps {
   error: string | null;
   isLoading: boolean;
   onRefresh: () => void;
+  onNavigate?: (nav: string) => void;
+  onOpenAgentWorkspace?: (mode?: AgentSpecialistMode, initialPrompt?: string) => void;
 }
 
 export const DashboardPage: React.FC<DashboardPageProps> = ({
@@ -27,9 +45,27 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
   error,
   isLoading,
   onRefresh,
+  onNavigate,
+  onOpenAgentWorkspace,
 }) => {
+  const [quickPrompt, setQuickPrompt] = useState('');
+  const { activeProviderLabel, activeModelLabel } = useAICore();
   const isEmergencyActive = emergencyStatus?.is_active ?? false;
   const isConnected = connectionState === 'connected';
+  const baseUrl = apiClient.getBaseUrl();
+  const hostLabel = baseUrl.replace(/^https?:\/\//i, '');
+
+  const handleQuickSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleaned = quickPrompt.trim();
+    if (!cleaned) return;
+    setQuickPrompt('');
+    if (onOpenAgentWorkspace) {
+      onOpenAgentWorkspace('all', cleaned);
+    } else {
+      onNavigate?.('agent');
+    }
+  };
 
   return (
     <>
@@ -38,7 +74,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
         <div>
           <h1 className="page-title">Agent Control Dashboard</h1>
           <p className="page-description">
-            Real-time status overview, backend telemetry, safety latches, and automation state.
+            VoxPilot desktop command center: AI Core telemetry, voice status, hardware metrics, and safety latches.
           </p>
         </div>
         <div className="page-header-actions">
@@ -59,11 +95,123 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
       {connectionState === 'disconnected' && (
         <ErrorState
           title="Backend Service Disconnected"
-          message={`Could not connect to VoxPilot backend at ${health ? health.service : 'http://127.0.0.1:8000'}. Error: ${error || 'Connection refused.'}`}
+          message={`Could not connect to VoxPilot backend at ${baseUrl}. Error: ${error || 'Connection refused.'}`}
           onRetry={onRefresh}
           isRetrying={isLoading}
         />
       )}
+
+      {/* Command Center Top Grid: Prominent AI Core + Quick Command & Specialist Launcher */}
+      <div className="vp-command-grid" data-testid="dashboard-command-center">
+        <AICoreHeroCard
+          onOpenAgent={() =>
+            onOpenAgentWorkspace ? onOpenAgentWorkspace('all') : onNavigate?.('agent')
+          }
+          onOpenSettings={() => onNavigate?.('settings')}
+        />
+
+        <section className="vp-quick-command-card" data-testid="dashboard-quick-command">
+          <div>
+            <h2 className="dashboard-card-title" style={{ marginBottom: 4 }}>
+              Quick Command & Specialist Hub
+            </h2>
+            <p className="dashboard-card-description">
+              Send a natural language instruction or jump straight into a specialist assistant mode.
+            </p>
+          </div>
+
+          <form className="vp-quick-command-form" onSubmit={handleQuickSubmit}>
+            <input
+              type="text"
+              className="vp-quick-command-input"
+              placeholder="Ask VoxPilot to run a task, summarize emails, research, or organize files..."
+              value={quickPrompt}
+              onChange={(e) => setQuickPrompt(e.target.value)}
+              disabled={!isConnected}
+              data-testid="dashboard-quick-command-input"
+            />
+            <button
+              type="submit"
+              className="vp-btn-primary"
+              disabled={!isConnected || !quickPrompt.trim()}
+              data-testid="dashboard-quick-command-submit"
+            >
+              <Send size={14} />
+              <span>Run</span>
+            </button>
+          </form>
+
+          <div className="vp-specialist-launchers">
+            <button
+              type="button"
+              className="vp-specialist-tile"
+              onClick={() =>
+                onOpenAgentWorkspace ? onOpenAgentWorkspace('voice') : onNavigate?.('agent')
+              }
+              data-testid="specialist-launch-voice"
+            >
+              <Mic size={15} style={{ color: 'var(--accent-blue)' }} />
+              <span>Voice Assistant</span>
+            </button>
+
+            <button
+              type="button"
+              className="vp-specialist-tile"
+              onClick={() =>
+                onOpenAgentWorkspace ? onOpenAgentWorkspace('files') : onNavigate?.('agent')
+              }
+              data-testid="specialist-launch-files"
+            >
+              <FolderOpen size={15} style={{ color: 'var(--accent-blue)' }} />
+              <span>File Assistant</span>
+            </button>
+
+            <button
+              type="button"
+              className="vp-specialist-tile"
+              onClick={() =>
+                onOpenAgentWorkspace ? onOpenAgentWorkspace('research') : onNavigate?.('agent')
+              }
+              data-testid="specialist-launch-research"
+            >
+              <Globe size={15} style={{ color: 'var(--accent-blue)' }} />
+              <span>Browser Research</span>
+            </button>
+
+            <button
+              type="button"
+              className="vp-specialist-tile"
+              onClick={() =>
+                onOpenAgentWorkspace ? onOpenAgentWorkspace('email') : onNavigate?.('agent')
+              }
+              data-testid="specialist-launch-email"
+            >
+              <Mail size={15} style={{ color: 'var(--accent-blue)' }} />
+              <span>Email Assistant</span>
+            </button>
+
+            <button
+              type="button"
+              className="vp-specialist-tile"
+              onClick={() => onNavigate?.('applications')}
+              data-testid="specialist-launch-apps"
+            >
+              <AppWindow size={15} style={{ color: 'var(--accent-blue)' }} />
+              <span>App Launcher</span>
+            </button>
+
+            <button
+              type="button"
+              className="vp-specialist-tile"
+              onClick={() => onNavigate?.('automation')}
+              data-testid="specialist-launch-automation"
+            >
+              <Cpu size={15} style={{ color: 'var(--accent-blue)' }} />
+              <span>Automations</span>
+            </button>
+          </div>
+        </section>
+      </div>
 
       {/* Primary Overview Cards Grid */}
       <div className="status-cards-grid">
@@ -80,17 +228,17 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
           }
           badgeText={health ? `v${health.version}` : undefined}
           badgeVariant={connectionState === 'connected' ? 'success' : 'danger'}
-          detail="FastAPI Localhost Daemon (127.0.0.1:8000)"
+          detail={`FastAPI Localhost Daemon (${hostLabel})`}
         />
 
         {/* Card 2: AI Agent State */}
         <StatusCard
           icon={<Bot size={18} />}
-          label="LangGraph Agent"
-          value={isConnected ? 'Available' : 'Unavailable'}
-          badgeText={isConnected ? 'Ollama' : 'Offline'}
+          label="AI Runtime & Agent"
+          value={isConnected ? activeProviderLabel : 'Unavailable'}
+          badgeText={isConnected ? activeModelLabel : 'Offline'}
           badgeVariant={isConnected ? 'success' : 'neutral'}
-          detail={isConnected ? '37 Registered Tools allowlisted' : 'Awaiting backend connection'}
+          detail={isConnected ? 'LangGraph orchestrator & allowlisted tools ready' : 'Awaiting backend connection'}
         />
 
         {/* Card 3: Emergency Stop Latch */}

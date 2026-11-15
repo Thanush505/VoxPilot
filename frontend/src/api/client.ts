@@ -67,6 +67,11 @@ import {
   AutomationExecutionHistoryListResponse,
   AIProviderId,
   AIProviderHealth,
+  AIProviderModelInfo,
+  BYOKVendorId,
+  BYOKVendorStatus,
+  BYOKConfigureResponse,
+  BYOKValidateResponse,
   ProfileProviderConfig,
   ProvidersListResponse,
   ActiveProviderResponse,
@@ -74,14 +79,129 @@ import {
   OpenAIBYOKValidateResponse,
 } from './types';
 
+export function resolveApiBaseUrl(): string {
+  // Prefer the same loopback origin when served directly by VoxPilot's embedded FastAPI server
+  // (desktop shell dynamic ports or direct backend static serving), excluding Vite dev/preview ports.
+  if (typeof window !== 'undefined' && window.location && window.location.origin) {
+    const origin = window.location.origin.trim().replace(/\/+$/, '');
+    const match = origin.match(/^https?:\/\/(127\.0\.0\.1|localhost)(?::(\d+))?$/i);
+    if (match) {
+      const port = match[2];
+      if (port !== '5173' && port !== '4173') {
+        return origin;
+      }
+    }
+  }
+
+  const configured = import.meta.env.VITE_API_BASE_URL;
+  if (typeof configured === 'string' && configured.trim().length > 0) {
+    return configured.trim().replace(/\/+$/, '');
+  }
+
+  return 'http://127.0.0.1:8000';
+}
+
+const DESKTOP_TOKEN_META_NAME = 'voxpilot-desktop-token';
+
+declare global {
+  interface Window {
+    __VOXPILOT_DESKTOP_TOKEN__?: string;
+  }
+}
+
+let cachedDesktopSessionToken: string | null = null;
+
+/** Explicitly seed or clear the in-memory desktop session token (used by tests or shell bootstrap). */
+export function setDesktopSessionToken(token: string | null): void {
+  cachedDesktopSessionToken = token && token.trim() ? token.trim() : null;
+}
+
+/** Return true only for local loopback http/https URLs or same-origin relative API paths. */
+export function isLoopbackApiUrl(targetUrl: string): boolean {
+  const trimmed = (targetUrl || '').trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (trimmed.startsWith('/')) {
+    if (trimmed.startsWith('//')) {
+      return false;
+    }
+    if (typeof window !== 'undefined' && window.location?.hostname) {
+      const host = window.location.hostname.toLowerCase();
+      return host === '127.0.0.1' || host === 'localhost';
+    }
+    return true;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    const hostname = parsed.hostname.toLowerCase();
+    return (
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      (hostname === '127.0.0.1' || hostname === 'localhost')
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Resolve and scrub the desktop session token from runtime bootstrap globals or DOM metadata. */
+export function resolveDesktopSessionToken(): string | null {
+  if (typeof window !== 'undefined') {
+    const injected = window.__VOXPILOT_DESKTOP_TOKEN__;
+    if (typeof injected === 'string' && injected.trim()) {
+      if (!cachedDesktopSessionToken) {
+        cachedDesktopSessionToken = injected.trim();
+      }
+    }
+    if ('__VOXPILOT_DESKTOP_TOKEN__' in window || typeof injected !== 'undefined') {
+      try {
+        delete window.__VOXPILOT_DESKTOP_TOKEN__;
+      } catch {
+        window.__VOXPILOT_DESKTOP_TOKEN__ = undefined;
+      }
+    }
+  }
+
+  if (typeof document !== 'undefined' && typeof document.querySelector === 'function') {
+    const meta = document.querySelector(`meta[name="${DESKTOP_TOKEN_META_NAME}"]`);
+    if (meta) {
+      const content = typeof meta.getAttribute === 'function' ? meta.getAttribute('content')?.trim() : undefined;
+      if (content && !cachedDesktopSessionToken) {
+        cachedDesktopSessionToken = content;
+      }
+      meta.removeAttribute?.('content');
+      meta.parentNode?.removeChild?.(meta);
+    }
+  }
+
+  return cachedDesktopSessionToken;
+}
+
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  const scrubTokenOnEvent = () => {
+    resolveDesktopSessionToken();
+  };
+  window.addEventListener('voxpilot:token-ready', scrubTokenOnEvent);
+  window.addEventListener('load', scrubTokenOnEvent);
+}
+
 class ApiClient {
   private baseUrl: string;
   private defaultTimeoutMs: number;
 
   constructor() {
-    const rawUrl = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
-    this.baseUrl = rawUrl.replace(/\/+$/, '');
+    this.baseUrl = resolveApiBaseUrl();
     this.defaultTimeoutMs = 120000; // 120 seconds to match max agent execution budget
+  }
+
+  private getSecurityHeaders(targetUrl: string): Record<string, string> {
+    const token = resolveDesktopSessionToken();
+    if (!token || !isLoopbackApiUrl(targetUrl)) {
+      return {};
+    }
+    return {
+      'X-VoxPilot-Desktop-Token': token,
+    };
   }
 
   public getBaseUrl(): string {
@@ -107,6 +227,7 @@ class ApiClient {
           Accept: 'application/json',
           'Content-Type': 'application/json',
           ...options.headers,
+          ...this.getSecurityHeaders(url),
         },
       });
 
@@ -410,6 +531,7 @@ class ApiClient {
         method: 'GET',
         headers: {
           Accept: 'application/json, text/csv, */*',
+          ...this.getSecurityHeaders(url),
         },
       });
 
@@ -1333,6 +1455,17 @@ class ApiClient {
     );
   }
 
+  public async recordNotificationActivity(active: boolean): Promise<ApiResponse<{ ok: boolean }>> {
+    return this.request<{ ok: boolean }>(
+      '/api/system/notifications/activity',
+      {
+        method: 'POST',
+        body: JSON.stringify({ active: Boolean(active) }),
+      },
+      5000
+    );
+  }
+
   // ============================================================================
   // Custom Automation Builder API (Phase 6A)
   // ============================================================================
@@ -1534,13 +1667,20 @@ class ApiClient {
     );
   }
 
-  public async configureOpenAIBYOK(payload: {
-    api_key: string;
-    model?: string;
-    validate_connection?: boolean;
-  }): Promise<ApiResponse<OpenAIBYOKConfigureResponse>> {
-    return this.request<OpenAIBYOKConfigureResponse>(
-      '/api/providers/byok/openai/configure',
+  public async listBYOKVendors(): Promise<ApiResponse<{ vendors: BYOKVendorStatus[] }>> {
+    return this.request<{ vendors: BYOKVendorStatus[] }>('/api/providers/byok/vendors', {}, 10000);
+  }
+
+  public async configureBYOKVendor(
+    vendor: BYOKVendorId | string,
+    payload: {
+      api_key: string;
+      model?: string;
+      validate_connection?: boolean;
+    }
+  ): Promise<ApiResponse<BYOKConfigureResponse>> {
+    return this.request<BYOKConfigureResponse>(
+      `/api/providers/byok/${encodeURIComponent(vendor)}/configure`,
       {
         method: 'POST',
         body: JSON.stringify(payload),
@@ -1549,12 +1689,15 @@ class ApiClient {
     );
   }
 
-  public async validateOpenAIBYOK(payload?: {
-    api_key?: string;
-    model?: string;
-  }): Promise<ApiResponse<OpenAIBYOKValidateResponse>> {
-    return this.request<OpenAIBYOKValidateResponse>(
-      '/api/providers/byok/openai/validate',
+  public async validateBYOKVendor(
+    vendor: BYOKVendorId | string,
+    payload?: {
+      api_key?: string;
+      model?: string;
+    }
+  ): Promise<ApiResponse<BYOKValidateResponse>> {
+    return this.request<BYOKValidateResponse>(
+      `/api/providers/byok/${encodeURIComponent(vendor)}/validate`,
       {
         method: 'POST',
         body: JSON.stringify(payload ?? {}),
@@ -1563,11 +1706,23 @@ class ApiClient {
     );
   }
 
-  public async setOpenAIBYOKModel(
+  public async getBYOKVendorModels(
+    vendor: BYOKVendorId | string,
+    refresh: boolean = false
+  ): Promise<ApiResponse<{ vendor: string; models: AIProviderModelInfo[] }>> {
+    return this.request<{ vendor: string; models: AIProviderModelInfo[] }>(
+      `/api/providers/byok/${encodeURIComponent(vendor)}/models?refresh=${refresh ? 'true' : 'false'}`,
+      {},
+      15000
+    );
+  }
+
+  public async setBYOKVendorModel(
+    vendor: BYOKVendorId | string,
     model: string
-  ): Promise<ApiResponse<{ profile_config: ProfileProviderConfig }>> {
-    return this.request<{ profile_config: ProfileProviderConfig }>(
-      '/api/providers/byok/openai/model',
+  ): Promise<ApiResponse<{ profile_config: ProfileProviderConfig; vendor: string }>> {
+    return this.request<{ profile_config: ProfileProviderConfig; vendor: string }>(
+      `/api/providers/byok/${encodeURIComponent(vendor)}/model`,
       {
         method: 'POST',
         body: JSON.stringify({ model }),
@@ -1576,14 +1731,41 @@ class ApiClient {
     );
   }
 
-  public async removeOpenAIBYOKCredentials(): Promise<
-    ApiResponse<{ profile_config: ProfileProviderConfig; removed: boolean }>
-  > {
-    return this.request<{ profile_config: ProfileProviderConfig; removed: boolean }>(
-      '/api/providers/byok/openai/credentials',
+  public async removeBYOKVendorCredentials(
+    vendor: BYOKVendorId | string
+  ): Promise<ApiResponse<{ profile_config: ProfileProviderConfig; vendor: string; removed: boolean }>> {
+    return this.request<{ profile_config: ProfileProviderConfig; vendor: string; removed: boolean }>(
+      `/api/providers/byok/${encodeURIComponent(vendor)}/credentials`,
       { method: 'DELETE' },
       10000
     );
+  }
+
+  public async configureOpenAIBYOK(payload: {
+    api_key: string;
+    model?: string;
+    validate_connection?: boolean;
+  }): Promise<ApiResponse<OpenAIBYOKConfigureResponse>> {
+    return this.configureBYOKVendor('openai', payload);
+  }
+
+  public async validateOpenAIBYOK(payload?: {
+    api_key?: string;
+    model?: string;
+  }): Promise<ApiResponse<OpenAIBYOKValidateResponse>> {
+    return this.validateBYOKVendor('openai', payload);
+  }
+
+  public async setOpenAIBYOKModel(
+    model: string
+  ): Promise<ApiResponse<{ profile_config: ProfileProviderConfig }>> {
+    return this.setBYOKVendorModel('openai', model);
+  }
+
+  public async removeOpenAIBYOKCredentials(): Promise<
+    ApiResponse<{ profile_config: ProfileProviderConfig; removed: boolean }>
+  > {
+    return this.removeBYOKVendorCredentials('openai');
   }
 }
 

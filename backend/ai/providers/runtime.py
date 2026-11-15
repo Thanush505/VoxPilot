@@ -51,16 +51,17 @@ def run_provider_chat(
         raise ProviderCancelledError("Inference cancelled: Global Emergency Stop is active.")
 
     active_id, provider, cfg = resolve_runtime_provider(profile_id)
+    caps = provider.get_capabilities(cfg) if hasattr(provider, "get_capabilities") else provider.capabilities
 
-    if require_vision and not provider.capabilities.vision:
+    if require_vision and not caps.vision:
         raise ProviderConfigurationError(
             f"Active AI provider '{active_id}' does not support vision or image analysis."
         )
-    if require_tool_calling and not provider.capabilities.tool_calling:
+    if require_tool_calling and not caps.tool_calling:
         raise ProviderConfigurationError(
             f"Active AI provider '{active_id}' does not support native tool calling."
         )
-    if json_mode and active_id != PROVIDER_LOCAL and not provider.capabilities.structured_output:
+    if json_mode and active_id != PROVIDER_LOCAL and not caps.structured_output:
         raise ProviderConfigurationError(
             f"Active AI provider '{active_id}' does not support structured JSON output."
         )

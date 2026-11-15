@@ -8,12 +8,15 @@ import {
   Check,
   ShieldCheck,
   AlertTriangle,
+  Sparkles,
 } from 'lucide-react';
 import {
   ACCENT_PRESETS,
   DEFAULT_ACCENT_COLOR,
   DEFAULT_THEME_MODE,
   useTheme,
+  type MotionIntensity,
+  type ReducedMotionMode,
 } from '../../theme/ThemeProvider';
 import { ThemeMode } from '../../api/types';
 
@@ -48,6 +51,15 @@ export const ThemeSettingsCard: React.FC = () => {
     setThemeMode,
     setAccentColor,
     restoreDefaultTheme,
+    animationsEnabled,
+    motionIntensity,
+    reducedMotionMode,
+    effectiveReducedMotion,
+    aiCoreAnimationEnabled,
+    voiceOrbEnabled,
+    waveformEnabled,
+    updateMotionPreferences,
+    resetMotionPreferences,
   } = useTheme();
 
   const isDefault =
@@ -243,6 +255,134 @@ export const ThemeSettingsCard: React.FC = () => {
             >
               Primary Action
             </span>
+          </div>
+        </div>
+
+        {/* Motion, Animation & Visualizer Controls */}
+        <div className="vp-motion-controls-box" data-testid="animation-settings-section">
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600, fontSize: 13.5, color: 'var(--text-primary)' }}>
+                <Sparkles size={15} style={{ color: 'var(--accent-blue)' }} />
+                <span>Motion, AI Core &amp; Audio Visualizer Controls</span>
+              </div>
+              <div className="settings-hint">
+                Tune animation intensity or enable Reduced-Motion Mode. Animations automatically pause when VoxPilot is minimized or inactive.
+              </div>
+            </div>
+
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={resetMotionPreferences}
+              data-testid="reset-motion-settings-btn"
+            >
+              <RotateCcw size={13} />
+              <span>Reset Motion</span>
+            </button>
+          </div>
+
+          <div className="vp-motion-toggle-grid">
+            <label className="vp-motion-toggle-item">
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 12.5 }}>Decorative Animations</div>
+                <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
+                  Enable ambient orbital &amp; transition motion
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={animationsEnabled}
+                onChange={(e) => updateMotionPreferences({ animationsEnabled: e.target.checked })}
+                data-testid="toggle-animations-enabled"
+                aria-label="Enable Decorative Animations"
+              />
+            </label>
+
+            <label className="vp-motion-toggle-item">
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 12.5 }}>AI Core Animation</div>
+                <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
+                  State-driven AI Core glow &amp; rings
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={aiCoreAnimationEnabled}
+                onChange={(e) => updateMotionPreferences({ aiCoreAnimationEnabled: e.target.checked })}
+                disabled={!animationsEnabled || effectiveReducedMotion}
+                data-testid="toggle-ai-core-animation"
+                aria-label="Enable AI Core Animation"
+              />
+            </label>
+
+            <label className="vp-motion-toggle-item">
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 12.5 }}>Voice Orb Visualization</div>
+                <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
+                  Animate central Voice &amp; Header Orb
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={voiceOrbEnabled}
+                onChange={(e) => updateMotionPreferences({ voiceOrbEnabled: e.target.checked })}
+                disabled={!animationsEnabled || effectiveReducedMotion}
+                data-testid="toggle-voice-orb"
+                aria-label="Enable Voice Orb Visualization"
+              />
+            </label>
+
+            <label className="vp-motion-toggle-item">
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 12.5 }}>Audio-Reactive Waveform</div>
+                <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
+                  Live 16-band mic &amp; TTS signal bars
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={waveformEnabled}
+                onChange={(e) => updateMotionPreferences({ waveformEnabled: e.target.checked })}
+                data-testid="toggle-audio-waveform"
+                aria-label="Enable Audio-Reactive Waveform"
+              />
+            </label>
+          </div>
+
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
+            <label className="vp-provider-field" style={{ flex: '1 1 200px' }}>
+              <span>Motion Intensity</span>
+              <select
+                className="vp-provider-input"
+                value={motionIntensity}
+                disabled={!animationsEnabled || effectiveReducedMotion}
+                onChange={(e) =>
+                  updateMotionPreferences({ motionIntensity: e.target.value as MotionIntensity })
+                }
+                data-testid="select-motion-intensity"
+              >
+                <option value="subtle">Subtle (Minimal motion)</option>
+                <option value="balanced">Balanced (Recommended)</option>
+                <option value="expressive">Expressive (Dynamic)</option>
+              </select>
+            </label>
+
+            <label className="vp-provider-field" style={{ flex: '1 1 200px' }}>
+              <span>Reduced-Motion Mode</span>
+              <select
+                className="vp-provider-input"
+                value={reducedMotionMode}
+                onChange={(e) =>
+                  updateMotionPreferences({ reducedMotionMode: e.target.value as ReducedMotionMode })
+                }
+                data-testid="select-reduced-motion-mode"
+              >
+                <option value="system">Follow Windows System Setting</option>
+                <option value="on">Always Reduced Motion</option>
+                <option value="off">Full Motion (Override OS)</option>
+              </select>
+            </label>
           </div>
         </div>
 

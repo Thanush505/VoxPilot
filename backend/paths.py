@@ -10,12 +10,23 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Optional, List
+from typing import Dict, List, Optional
 
 
 def is_frozen() -> bool:
     """Check whether the application is running inside a PyInstaller frozen bundle."""
     return getattr(sys, "frozen", False)
+
+
+def _use_user_data_root() -> bool:
+    """Return True when writable runtime paths should resolve under get_user_data_dir()."""
+    if is_frozen():
+        return True
+    if os.environ.get("VOXPILOT_FORCE_USER_DATA", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    if os.environ.get("VOXPILOT_USER_DATA_DIR", "").strip():
+        return True
+    return False
 
 
 def get_project_root() -> Path:
@@ -89,7 +100,7 @@ def get_database_path() -> Path:
             p.parent.mkdir(parents=True, exist_ok=True)
         return p
 
-    if is_frozen() or os.environ.get("VOXPILOT_FORCE_USER_DATA", "").strip().lower() in ("1", "true", "yes"):
+    if _use_user_data_root():
         db_dir = get_user_data_dir() / "data"
         db_dir.mkdir(parents=True, exist_ok=True)
         return (db_dir / "voxpilot.db").resolve()
@@ -107,7 +118,7 @@ def get_export_dir() -> Path:
         p.mkdir(parents=True, exist_ok=True)
         return p
 
-    if is_frozen() or os.environ.get("VOXPILOT_FORCE_USER_DATA", "").strip().lower() in ("1", "true", "yes"):
+    if _use_user_data_root():
         export_dir = get_user_data_dir() / "exports"
     else:
         export_dir = get_project_root() / "data" / "exports"
@@ -124,7 +135,7 @@ def get_log_dir() -> Path:
         p.mkdir(parents=True, exist_ok=True)
         return p
 
-    if is_frozen() or os.environ.get("VOXPILOT_FORCE_USER_DATA", "").strip().lower() in ("1", "true", "yes"):
+    if _use_user_data_root():
         log_dir = get_user_data_dir() / "logs"
     else:
         log_dir = get_project_root() / "logs"
@@ -190,9 +201,74 @@ def get_updates_dir() -> Path:
 
 
 
+def get_credentials_dir() -> Path:
+    """Return the persistent encrypted credential directory under the user data root."""
+    custom = os.environ.get("VOXPILOT_CREDENTIALS_DIR", "").strip()
+    if custom:
+        p = Path(custom).resolve()
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    cred_dir = get_user_data_dir() / "credentials"
+    cred_dir.mkdir(parents=True, exist_ok=True)
+    return cred_dir.resolve()
+
+
+def get_backups_dir() -> Path:
+    """Return the persistent directory for SQLite-consistent snapshots and backups."""
+    custom = os.environ.get("VOXPILOT_BACKUP_DIR", "").strip()
+    if custom:
+        p = Path(custom).resolve()
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    backup_dir = get_user_data_dir() / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    return backup_dir.resolve()
+
+
+def get_screenshots_dir() -> Path:
+    """Return the writable internal screenshots storage directory."""
+    custom = os.environ.get("VOXPILOT_SCREENSHOT_DIR", "").strip()
+    if custom:
+        p = Path(custom).resolve()
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    screenshots_dir = get_user_data_dir() / "screenshots"
+    screenshots_dir.mkdir(parents=True, exist_ok=True)
+    return screenshots_dir.resolve()
+
+
+def get_downloads_dir() -> Path:
+    """Return the writable internal downloads storage directory."""
+    custom = os.environ.get("VOXPILOT_DOWNLOAD_DIR", "").strip()
+    if custom:
+        p = Path(custom).resolve()
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    downloads_dir = get_user_data_dir() / "downloads"
+    downloads_dir.mkdir(parents=True, exist_ok=True)
+    return downloads_dir.resolve()
+
+
+def get_webview_storage_dir() -> Path:
+    """Return the persistent WebView2 profile/cache storage directory."""
+    custom = os.environ.get("VOXPILOT_WEBVIEW_DIR", "").strip()
+    if custom:
+        p = Path(custom).resolve()
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    webview_dir = get_user_data_dir() / "webview"
+    webview_dir.mkdir(parents=True, exist_ok=True)
+    return webview_dir.resolve()
+
+
 def get_voice_temp_dir() -> Path:
     """Return directory for temporary generated TTS audio files."""
-    if is_frozen() or os.environ.get("VOXPILOT_FORCE_USER_DATA", "").strip().lower() in ("1", "true", "yes"):
+    if _use_user_data_root():
         temp_dir = get_user_data_dir() / "temp" / "voice"
     else:
         temp_dir = get_project_root() / "models" / "piper" / "generated"
@@ -261,17 +337,55 @@ def get_app_icon_path() -> Path:
     return candidates[0].resolve()
 
 
+def get_runtime_paths_summary() -> Dict[str, str]:
+    """Return canonical resolved runtime paths for diagnostics without exposing secrets."""
+    return {
+        "mode": "frozen" if is_frozen() else "development",
+        "user_data_dir": str(get_user_data_dir()),
+        "database_path": str(get_database_path()),
+        "config_dir": str(get_config_dir()),
+        "credentials_dir": str(get_credentials_dir()),
+        "backups_dir": str(get_backups_dir()),
+        "log_dir": str(get_log_dir()),
+        "export_dir": str(get_export_dir()),
+        "screenshots_dir": str(get_screenshots_dir()),
+        "downloads_dir": str(get_downloads_dir()),
+        "voice_temp_dir": str(get_voice_temp_dir()),
+        "webview_storage_dir": str(get_webview_storage_dir()),
+        "updates_dir": str(get_updates_dir()),
+        "bundle_dir": str(get_bundle_dir()),
+        "executable_dir": str(get_executable_dir()),
+    }
+
+
 def ensure_user_directories() -> None:
     """Create all standard writable user data directories if they do not exist."""
-    get_user_data_dir()
-    (get_user_data_dir() / "data").mkdir(parents=True, exist_ok=True)
-    (get_user_data_dir() / "logs").mkdir(parents=True, exist_ok=True)
-    (get_user_data_dir() / "exports").mkdir(parents=True, exist_ok=True)
-    (get_user_data_dir() / "screenshots").mkdir(parents=True, exist_ok=True)
-    (get_user_data_dir() / "downloads").mkdir(parents=True, exist_ok=True)
-    (get_user_data_dir() / "config").mkdir(parents=True, exist_ok=True)
-    (get_user_data_dir() / "updates").mkdir(parents=True, exist_ok=True)
-    (get_user_data_dir() / "temp" / "voice").mkdir(parents=True, exist_ok=True)
+    root = get_user_data_dir()
+    for rel in (
+        "data",
+        "logs",
+        "exports",
+        "screenshots",
+        "downloads",
+        "config",
+        "credentials",
+        "backups",
+        "updates",
+        "webview",
+        "temp/voice",
+    ):
+        (root / rel).mkdir(parents=True, exist_ok=True)
+
+    get_database_path()
+    get_log_dir()
+    get_export_dir()
+    get_config_dir()
+    get_credentials_dir()
+    get_backups_dir()
+    get_screenshots_dir()
+    get_downloads_dir()
+    get_webview_storage_dir()
+    get_voice_temp_dir()
     get_updates_dir()
 
 

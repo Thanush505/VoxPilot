@@ -1,7 +1,8 @@
 """
-VoxPilot - Standalone Windows Launcher Entrypoint
-Initializes logging, performs pre-flight dependency checks, verifies data persistence paths,
-starts the Uvicorn ASGI server with the FastAPI backend, and serves the bundled React frontend.
+VoxPilot - Standalone Windows Desktop & Server Launcher Entrypoint
+Initializes stream safety, DPI awareness, logging, single-instance locking,
+pre-flight dependency checks, the local FastAPI/Uvicorn backend, and the native
+Windows PyWebView (Edge WebView2) desktop shell (with headless server-only fallback).
 """
 
 from __future__ import annotations
@@ -13,14 +14,24 @@ import sys
 import threading
 import time
 import urllib.request
-import webbrowser
 from pathlib import Path
+from typing import List, Optional
 
 # Add project root to sys.path if not present
 _current_dir = Path(__file__).resolve().parent
 if str(_current_dir) not in sys.path:
     sys.path.insert(0, str(_current_dir))
 
+from backend.ai.providers.credentials import SecretRedactingLogFilter
+from backend.desktop.shell import (
+    DesktopShellController,
+    SingleInstanceGuard,
+    configure_windows_desktop_process,
+    ensure_safe_standard_streams,
+    focus_existing_voxpilot_window,
+    set_shared_desktop_controller,
+    validate_loopback_host,
+)
 from backend.paths import (
     is_frozen,
     get_bundle_dir,
@@ -37,16 +48,25 @@ from backend.paths import (
 from backend.version import get_app_version
 
 
+def should_use_headless_server_mode(argv: Optional[List[str]] = None) -> bool:
+    """Return True when VoxPilot should run headless without a PyWebView desktop window."""
+    args = sys.argv[1:] if argv is None else argv
+    if "--server-only" in args or "--headless" in args:
+        return True
+    if os.environ.get("VOXPILOT_HEADLESS", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    if os.environ.get("VOXPILOT_AUTO_OPEN_BROWSER", "1").strip().lower() in ("0", "false", "no", "off"):
+        return True
+    return False
+
+
 def configure_windows_app_branding() -> None:
-    """Configure Windows AppUserModelID and console window icon on Windows 11."""
+    """Configure Windows AppUserModelID, DPI awareness, and attached console icon on Windows 11."""
+    configure_windows_desktop_process()
     if sys.platform != "win32":
         return
     try:
         import ctypes
-
-        # Set explicit AppUserModelID so Windows 11 taskbar groups VoxPilot under its own icon
-        app_id = f"VoxPilotTeam.VoxPilot.DesktopAgent.{get_app_version()}"
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
 
         # Set console window title and small/big icons (WM_SETICON) if a console window is attached
         ctypes.windll.kernel32.SetConsoleTitleW("VoxPilot — Personal AI Desktop Control Agent")
@@ -75,30 +95,41 @@ def configure_windows_app_branding() -> None:
 
 
 def setup_application_logging() -> logging.Logger:
-    """Initialize dual console and file logging in user data directory."""
+    """Initialize safe stream and file logging in user data directory."""
+    ensure_safe_standard_streams()
     ensure_user_directories()
     log_dir = get_log_dir()
     log_file = log_dir / "voxpilot.log"
 
     logger = logging.getLogger("voxpilot")
     logger.setLevel(logging.INFO)
+    redacting_filter = SecretRedactingLogFilter()
+    if not any(isinstance(f, SecretRedactingLogFilter) for f in logger.filters):
+        logger.addFilter(redacting_filter)
+
+    if logger.handlers:
+        return logger
 
     formatter = logging.Formatter(
         "[%(asctime)s] [%(levelname)s] [%(name)s]: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # Console handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+    # Stream handler (works safely even when sys.stdout is NullTextStream in console=False builds)
+    stream = sys.stdout
+    if stream is not None:
+        console_handler = logging.StreamHandler(stream)
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(formatter)
+        console_handler.addFilter(redacting_filter)
+        logger.addHandler(console_handler)
 
     # File handler
     try:
         file_handler = logging.FileHandler(str(log_file), encoding="utf-8")
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(formatter)
+        file_handler.addFilter(redacting_filter)
         logger.addHandler(file_handler)
     except Exception as err:
         print(f"[VoxPilot] Warning: Could not initialize log file at {log_file}: {err}")
@@ -258,24 +289,13 @@ def print_startup_banner(logger: logging.Logger, host: str, port: int) -> None:
 
 
 def open_browser_when_ready(host: str, port: int, delay_s: float = 1.5) -> None:
-    """Open default web browser to the VoxPilot dashboard once server starts."""
-    def _open():
-        time.sleep(delay_s)
-        url = f"http://{host}:{port}/"
-        try:
-            req = urllib.request.Request(f"http://{host}:{port}/health")
-            with urllib.request.urlopen(req, timeout=3):
-                pass
-            webbrowser.open(url)
-        except Exception:
-            pass
-
-    t = threading.Thread(target=_open, daemon=True)
-    t.start()
+    """Retained compatibility helper; desktop mode uses PyWebView instead of external browsers."""
+    return None
 
 
 def main():
     """Main launcher entrypoint."""
+    ensure_safe_standard_streams()
     configure_windows_app_branding()
     logger = setup_application_logging()
 
@@ -288,48 +308,71 @@ def main():
     if "--install-browser" in sys.argv or "--setup-browser" in sys.argv:
         sys.exit(install_playwright_chromium(logger))
 
-    host = os.environ.get("VOXPILOT_HOST", "127.0.0.1")
+    host = validate_loopback_host(os.environ.get("VOXPILOT_HOST", "127.0.0.1"))
     port = int(os.environ.get("VOXPILOT_PORT", "8000"))
 
-    # Single-instance check: If another instance of VoxPilot is already running, open browser and exit cleanly
-    if is_voxpilot_already_running(host, port):
-        logger.info(f"VoxPilot is already running on http://{host}:{port}/. Focusing existing instance...")
-        print(f"VoxPilot is already running on http://{host}:{port}/. Opening dashboard in browser...")
-        auto_open = os.environ.get("VOXPILOT_AUTO_OPEN_BROWSER", "1").strip().lower()
-        if auto_open not in ("0", "false", "no", "off"):
-            webbrowser.open(f"http://{host}:{port}/")
+    if should_use_headless_server_mode(sys.argv[1:]):
+        if is_voxpilot_already_running(host, port):
+            logger.info(f"VoxPilot headless server is already running on http://{host}:{port}/.")
+            return
+
+        print_startup_banner(logger, host, port)
+        check_ollama_service(logger)
+        check_piper_voice_model(logger)
+        check_faster_whisper_model(logger)
+        check_playwright_chromium(logger)
+
+        try:
+            from backend.main import app
+        except Exception as err:
+            logger.critical(f"Failed to load VoxPilot FastAPI application: {err}", exc_info=True)
+            sys.exit(1)
+
+        import uvicorn
+
+        try:
+            logger.info(f"Starting headless Uvicorn server on {host}:{port}...")
+            uvicorn.run(app, host=host, port=port, log_level="info", log_config=None, reload=False)
+        except KeyboardInterrupt:
+            logger.info("Received KeyboardInterrupt. Shutting down VoxPilot...")
+        except Exception as err:
+            logger.error(f"Uvicorn runtime error: {err}", exc_info=True)
+        finally:
+            logger.info("VoxPilot shutdown complete.")
         return
 
-    print_startup_banner(logger, host, port)
-
-    # Dependency pre-flight checks
-    check_ollama_service(logger)
-    check_piper_voice_model(logger)
-    check_faster_whisper_model(logger)
-    check_playwright_chromium(logger)
-
-    # Automatically launch dashboard in browser if requested
-    auto_open = os.environ.get("VOXPILOT_AUTO_OPEN_BROWSER", "1").strip().lower()
-    if auto_open not in ("0", "false", "no", "off"):
-        open_browser_when_ready(host, port)
-
-    # Import FastAPI application
-    try:
-        from backend.main import app
-    except Exception as err:
-        logger.critical(f"Failed to load VoxPilot FastAPI application: {err}", exc_info=True)
-        sys.exit(1)
-
-    import uvicorn
+    # Native Desktop Shell Mode (Default)
+    guard = SingleInstanceGuard()
+    if not guard.acquired or is_voxpilot_already_running(host, port):
+        logger.info("VoxPilot is already running. Activating existing desktop window...")
+        focus_existing_voxpilot_window(host, port)
+        guard.release()
+        return
 
     try:
-        logger.info(f"Starting Uvicorn server on {host}:{port}...")
-        uvicorn.run(app, host=host, port=port, log_level="info", reload=False)
-    except KeyboardInterrupt:
-        logger.info("Received KeyboardInterrupt. Shutting down VoxPilot...")
-    except Exception as err:
-        logger.error(f"Uvicorn runtime error: {err}", exc_info=True)
+        print_startup_banner(logger, host, port)
+
+        # Dependency pre-flight checks (non-fatal if external Ollama is stopped)
+        check_ollama_service(logger)
+        check_piper_voice_model(logger)
+        check_faster_whisper_model(logger)
+        check_playwright_chromium(logger)
+
+        try:
+            from backend.main import app
+        except Exception as err:
+            logger.critical(f"Failed to load VoxPilot FastAPI application: {err}", exc_info=True)
+            sys.exit(1)
+
+        controller = DesktopShellController(host=host, port=port)
+        set_shared_desktop_controller(controller)
+        logger.info(f"Launching VoxPilot native desktop window for http://{host}:{port}...")
+        exit_code = controller.run(app)
+        if exit_code:
+            sys.exit(exit_code)
     finally:
+        set_shared_desktop_controller(None)
+        guard.release()
         logger.info("VoxPilot shutdown complete.")
 
 
