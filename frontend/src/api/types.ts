@@ -205,6 +205,13 @@ export interface VoiceSettings {
   streaming_vad_enabled: boolean;
   wake_word_enabled?: boolean;
   wake_word_cooldown_seconds?: number;
+  floating_orb_enabled?: boolean;
+  floating_orb_visible?: boolean;
+  floating_orb_show_when_idle?: boolean;
+  floating_orb_corner?: 'top_left' | 'top_right' | 'bottom_left' | 'bottom_right' | 'custom';
+  floating_orb_x?: number | null;
+  floating_orb_y?: number | null;
+  floating_orb_animations?: boolean;
 }
 
 export interface VoiceShortcutStatus {

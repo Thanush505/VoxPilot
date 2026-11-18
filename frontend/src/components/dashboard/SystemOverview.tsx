@@ -220,7 +220,7 @@ export const SystemOverview: React.FC<SystemOverviewProps> = ({
       )}
 
       {/* Hardware Metrics Grid */}
-      <div className="metrics-grid">
+      <div className="metrics-grid vp-hardware-metrics-grid">
         {/* Host OS */}
         <div className={`metric-box ${!hardware ? 'disabled' : ''}`}>
           <div className="metric-box-header">
@@ -299,6 +299,14 @@ export const SystemOverview: React.FC<SystemOverviewProps> = ({
               ` • ${gpu.temperature_celsius !== null ? `${formatNumber(gpu.temperature_celsius, 1)}°C` : '—°C'}`
               : 'Unavailable'}
           </div>
+          {gpu?.available && gpu.utilization_percent !== null && (
+            <div className="telemetry-bar-track">
+              <div
+                className={`telemetry-bar-fill ${getTelemetryLevelClass(gpu.utilization_percent)}`}
+                style={{ width: `${Math.min(100, Math.max(0, gpu.utilization_percent))}%` }}
+              />
+            </div>
+          )}
           <div className="metric-box-footer">
             {gpu?.available
               ? gpu.name || 'NVIDIA GPU'
@@ -334,7 +342,11 @@ export const SystemOverview: React.FC<SystemOverviewProps> = ({
       </div>
 
       {/* Ollama Runtime & Model Lifecycle Section */}
-      <div className="ollama-runtime-panel">
+      <div
+        className={`ollama-runtime-panel ${
+          ollamaReachable ? 'ollama-runtime-panel--healthy' : 'ollama-runtime-panel--unreachable'
+        }`}
+      >
         <div className="ollama-runtime-header">
           <div className="ollama-runtime-title-group">
             <Bot size={16} />

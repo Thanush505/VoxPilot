@@ -161,18 +161,22 @@ class VoicePipeline:
             return None
         return self.wake_detector.listen_for_wake_word(timeout=timeout)
 
-    def listen(self, duration=5, stop_event=None):
+    def listen(self, duration=5, stop_event=None, on_capture_active=None):
         if self.use_streaming_vad:
+            kwargs = {}
             if stop_event is not None:
-                audio = self.recorder.record_until_silence(stop_event=stop_event)
-            else:
-                audio = self.recorder.record_until_silence()
+                kwargs["stop_event"] = stop_event
+            if on_capture_active is not None:
+                kwargs["on_capture_active"] = on_capture_active
+            audio = self.recorder.record_until_silence(**kwargs)
         else:
             print("\nVoxPilot is listening...")
+            kwargs = {"duration": duration}
             if stop_event is not None:
-                audio = self.recorder.record(duration=duration, stop_event=stop_event)
-            else:
-                audio = self.recorder.record(duration=duration)
+                kwargs["stop_event"] = stop_event
+            if on_capture_active is not None:
+                kwargs["on_capture_active"] = on_capture_active
+            audio = self.recorder.record(**kwargs)
 
         return audio
 

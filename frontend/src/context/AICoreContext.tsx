@@ -51,6 +51,7 @@ export interface AICoreStateMeta {
 
 export function deriveAICoreState(params: {
   isConnected: boolean;
+  providerAvailable?: boolean;
   emergencyActive: boolean;
   voiceStatus: VoiceStatusResponse | null;
   agentPhase: AgentExecutionPhase;
@@ -166,6 +167,11 @@ export function deriveAICoreState(params: {
       detail: agentDetail || 'Task completed cleanly.',
       pillVariant: 'success',
     };
+  }
+
+  if (params.providerAvailable === false) {
+    return { state: 'idle', label: 'AI Unavailable',
+      detail: 'Your AI provider is unavailable. Check the connection in Settings.', pillVariant: 'warning' };
   }
 
   return {
@@ -345,12 +351,13 @@ export const AICoreProvider: React.FC<{
     () =>
       deriveAICoreState({
         isConnected,
+        providerAvailable: activeProvider?.health.available,
         emergencyActive,
         voiceStatus,
         agentPhase,
         agentDetail,
       }),
-    [isConnected, emergencyActive, voiceStatus, agentPhase, agentDetail]
+    [isConnected, activeProvider, emergencyActive, voiceStatus, agentPhase, agentDetail]
   );
 
   const audioTelemetry = useMemo<VoiceAudioTelemetry>(() => {

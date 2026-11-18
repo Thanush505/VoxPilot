@@ -373,6 +373,11 @@ class AgentPlanner:
                 ),
             }
 
+        # Resolve natural-language folder listing requests against actual existing directories.
+        list_plan = self._parse_list_directory_request(clean, lower)
+        if list_plan is not None:
+            return list_plan
+
         # 1. Direct core application launching ("Open Notepad", "Launch Calculator", "Start VS Code")
         launch_match = re.search(
             r"^(?:open|launch|start|run)\s+(notepad|calculator|chrome|google\s+chrome|vs\s*code|vscode|visual\s+studio\s+code)\.?$",
@@ -697,48 +702,14 @@ class AgentPlanner:
                 "response": f"Please confirm if you wish to close {app_name.capitalize()}.",
             }
 
-        # 7. Create text file ("Create a text file named notes.txt",
-        #    "Create a text file containing these notes: ...",
-        #    "Create a text file named todo.txt containing Buy milk")
-        create_with_content_match = re.search(
-            r"^(?:create|make)\s+(?:a\s+)?(?:new\s+)?(?:text\s+)?file\s+(?:(?:named|called)\s+([a-zA-Z0-9_\-\.]+\.[a-zA-Z0-9]+)\s+)?(?:containing|with)\s+(?:these\s+notes\s*:?\s*|content\s*:?\s*)?(.+)$",
-            clean,
-            re.IGNORECASE | re.DOTALL,
-        )
-        if create_with_content_match:
-            import os
-            filename = create_with_content_match.group(1) or "notes.txt"
-            note_content = create_with_content_match.group(2).strip().strip("'\"")
-            target_path = filename if os.path.isabs(filename) else os.path.join(os.path.expanduser("~"), "Documents", filename)
-            return {
-                "steps": [
-                    {
-                        "action": "create_file",
-                        "description": f"Create text file '{filename}' with provided content",
-                        "parameters": {"file_path": target_path, "content": note_content},
-                        "requires_confirmation": False,
-                    }
-                ],
-                "response": f"Creating '{target_path}' with your notes.",
-            }
-
-        create_file_match = re.search(
-            r"^(?:create|make)\s+(?:a\s+)?(?:new\s+)?(?:text\s+)?file\s+(?:named\s+|called\s+)?([a-zA-Z0-9_\-\.]+\.[a-zA-Z0-9]+)\.?$",
-            lower,
-        )
-        if create_file_match:
-            filename = create_file_match.group(1)
-            return {
-                "steps": [
-                    {
-                        "action": "create_file",
-                        "description": f"Create text file '{filename}'",
-                        "parameters": {"file_path": filename, "content": ""},
-                        "requires_confirmation": False,
-                    }
-                ],
-                "response": f"Creating text file '{filename}'.",
-            }
+        # 7. Create file ("Create a Notepad file in desktop.",
+        #    "Create a text file on my desktop.",
+        #    "Create a Python file in downloads.",
+        #    "Create a text file named notes.txt",
+        #    "Create a text file containing these notes: ...")
+        create_plan = self._parse_create_file_request(clean, lower)
+        if create_plan is not None:
+            return create_plan
 
         # 8. Save document ("Save the document", "Save the current document")
         if re.search(r"^save\s+(?:the\s+)?(?:current\s+)?(?:document|file)\.?$", lower):
@@ -911,6 +882,278 @@ class AgentPlanner:
                     }
 
         return None
+
+    _FILE_TYPE_DEFAULT_NAMES: Dict[str, str] = {
+        "notepad": "New Text Document.txt",
+        "text": "New Text Document.txt",
+        "txt": "New Text Document.txt",
+        "note": "New Text Document.txt",
+        "notes": "New Text Document.txt",
+        "python": "new_file.py",
+        "py": "new_file.py",
+        "html": "index.html",
+        "htm": "index.html",
+        "markdown": "notes.md",
+        "md": "notes.md",
+        "json": "data.json",
+        "csv": "data.csv",
+        "yaml": "config.yaml",
+        "yml": "config.yaml",
+        "xml": "data.xml",
+        "javascript": "script.js",
+        "js": "script.js",
+        "typescript": "script.ts",
+        "ts": "script.ts",
+        "css": "styles.css",
+        "sql": "query.sql",
+        "log": "app.log",
+        "batch": "script.bat",
+        "bat": "script.bat",
+        "powershell": "script.ps1",
+        "ps1": "script.ps1",
+    }
+
+    def _parse_create_file_request(self, clean: str, lower: str) -> Optional[Dict[str, Any]]:
+        """Deterministically plan natural-language file creation with known-folder and default-filename inference."""
+        import os
+        from pathlib import Path
+        from backend.automation.file_manager import (
+            generate_unique_filename,
+            resolve_known_folder,
+        )
+
+        # Split optional trailing content clause ("containing ...", "with content ...")
+        note_content = ""
+        header = clean
+        content_match = re.search(
+            r"\s+(?:containing|with)\s+(?:these\s+notes\s*:?\s*|content\s*:?\s*)?(.+)$",
+            clean,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if content_match:
+            header = clean[: content_match.start()].strip()
+            note_content = content_match.group(1).strip().strip("'\"")
+
+        header_match = re.match(
+            r"^(?:create|make)\s+(?:an?\s+)?(?:new\s+)?(?:empty\s+)?(?:(?P<ftype>notepad|text|txt|python|py|html|htm|markdown|md|json|csv|yaml|yml|xml|javascript|js|typescript|ts|css|sql|log|batch|bat|powershell|ps1|notes?)\s+)?(?:file|document)(?P<rest>.*)$",
+            header.strip().rstrip(".!?"),
+            re.IGNORECASE,
+        )
+        if not header_match:
+            return None
+
+        ftype = (header_match.group("ftype") or "").lower() or None
+        rest = (header_match.group("rest") or "").strip()
+
+        # Extract destination clause ("in desktop", "on my desktop", "in C:\...", etc.)
+        dest_text: Optional[str] = None
+        dest_match = re.search(
+            r"\b(?:in|on|to|into|at|inside)\s+(?P<dest>.+?)\s*$",
+            rest,
+            re.IGNORECASE,
+        )
+        if dest_match:
+            dest_text = dest_match.group("dest").strip().strip("'\"")
+            rest = rest[: dest_match.start()].strip()
+
+        # Extract explicit filename if provided ("named foo.txt", "called bar", or standalone "foo.txt")
+        explicit_filename: Optional[str] = None
+        name_match = re.match(
+            r"^(?:named|called)\s+['\"]?([a-zA-Z0-9_\-\. ]+?)['\"]?$",
+            rest,
+            re.IGNORECASE,
+        )
+        if name_match:
+            explicit_filename = name_match.group(1).strip()
+        elif rest and re.match(r"^[a-zA-Z0-9_\-\.]+\.[a-zA-Z0-9]+$", rest):
+            explicit_filename = rest
+
+        # Append inferred extension if user gave a bare name alongside a file type (e.g. "python file named app")
+        if explicit_filename and "." not in explicit_filename and ftype in self._FILE_TYPE_DEFAULT_NAMES:
+            default_ext = Path(self._FILE_TYPE_DEFAULT_NAMES[ftype]).suffix
+            explicit_filename = f"{explicit_filename}{default_ext}"
+
+        filename_is_default = explicit_filename is None
+        default_name = (
+            self._FILE_TYPE_DEFAULT_NAMES.get(ftype, "New Text Document.txt")
+            if ftype
+            else ("notes.txt" if note_content else "New Text Document.txt")
+        )
+        filename = explicit_filename or default_name
+
+        # Resolve destination directory
+        dest_dir: Optional[Path] = None
+        if dest_text:
+            dest_dir = resolve_known_folder(dest_text)
+            if dest_dir is None:
+                if os.path.isabs(dest_text):
+                    dest_dir = Path(dest_text)
+                else:
+                    clarify_msg = (
+                        f"I couldn't recognize the destination folder '{dest_text}'. "
+                        "Please specify a known folder (such as Desktop, Downloads, Documents, or Pictures) "
+                        "or provide a full directory path."
+                    )
+                    return {
+                        "steps": [
+                            {
+                                "action": "ask_clarification",
+                                "description": clarify_msg,
+                                "parameters": {"question": clarify_msg},
+                                "requires_confirmation": False,
+                            }
+                        ],
+                        "response": clarify_msg,
+                    }
+        elif note_content:
+            dest_dir = resolve_known_folder("documents") or (Path.home() / "Documents")
+        elif explicit_filename is None:
+            clarify_msg = (
+                "Where should I create the file? Please specify a destination such as "
+                "Desktop, Downloads, Documents, Pictures, or a full path."
+            )
+            return {
+                "steps": [
+                    {
+                        "action": "ask_clarification",
+                        "description": clarify_msg,
+                        "parameters": {"question": clarify_msg},
+                        "requires_confirmation": False,
+                    }
+                ],
+                "response": clarify_msg,
+            }
+
+        if dest_dir is not None:
+            if filename_is_default and dest_dir.is_dir():
+                target_path = generate_unique_filename(dest_dir, filename)
+            else:
+                target_path = dest_dir / filename
+            target_str = str(target_path)
+        else:
+            target_str = filename
+
+        params: Dict[str, Any] = {
+            "file_path": target_str,
+            "content": note_content,
+        }
+        if filename_is_default:
+            params["auto_rename_on_conflict"] = True
+
+        return {
+            "steps": [
+                {
+                    "action": "create_file",
+                    "description": f"Create file '{Path(target_str).name}' at '{target_str}'",
+                    "parameters": params,
+                    "requires_confirmation": False,
+                }
+            ],
+            "response": (
+                f"Creating '{target_str}' with your notes."
+                if note_content
+                else f"Creating file at '{target_str}'."
+            ),
+        }
+
+    def _parse_list_directory_request(self, clean: str, lower: str) -> Optional[Dict[str, Any]]:
+        """Deterministically resolve natural-language directory listing requests against existing folders."""
+        from pathlib import Path
+        from backend.automation.file_manager import (
+            AmbiguousDirectoryError,
+            FileManager,
+            FileManagerError,
+            PathNotAllowedError,
+            PathNotFoundError,
+        )
+
+        # Pattern A: "List files in my Major Project folder", "Show contents of Documents"
+        match = re.match(
+            r"^(?:list|show)\s+(?:all\s+|the\s+|my\s+)?(?:files|folders|items|contents|everything|directory|folder)\s+(?:in|inside|of|from|under|within)\s+(?P<target>.+?)\.?$",
+            clean.strip(),
+            re.IGNORECASE,
+        )
+        if not match:
+            # Pattern B: "List my downloads", "Show desktop folder"
+            match = re.match(
+                r"^(?:list|show)\s+(?P<target>(?:my\s+|the\s+)?(?:downloads|documents|desktop|pictures|music|videos)(?:\s+folder)?)\.?$",
+                clean.strip(),
+                re.IGNORECASE,
+            )
+        if not match:
+            return None
+
+        raw_target = match.group("target").strip().strip("'\"")
+        if not raw_target:
+            return None
+
+        is_explicit = Path(raw_target).is_absolute() or any(c in raw_target for c in ("/", "\\", ":"))
+        try:
+            mgr = FileManager()
+            resolved = mgr.resolve_directory(raw_target)
+            if not resolved.is_dir():
+                clarify_msg = f"'{resolved}' is not a directory. Please provide a valid folder path."
+                return {
+                    "steps": [
+                        {
+                            "action": "ask_clarification",
+                            "description": clarify_msg,
+                            "parameters": {"question": clarify_msg},
+                            "requires_confirmation": False,
+                        }
+                    ],
+                    "response": clarify_msg,
+                }
+            resolved_str = str(resolved)
+            return {
+                "steps": [
+                    {
+                        "action": "list_directory",
+                        "description": f"List files in '{resolved_str}'",
+                        "parameters": {"directory_path": resolved_str},
+                        "requires_confirmation": False,
+                    }
+                ],
+                "response": f"Listing files in '{resolved_str}'.",
+            }
+        except AmbiguousDirectoryError as err:
+            candidates_str = "\n".join(f"- {p}" for p in err.candidates)
+            clarify_msg = (
+                f"Multiple folders match '{raw_target}'. Which one do you mean?\n{candidates_str}"
+            )
+            return {
+                "steps": [
+                    {
+                        "action": "ask_clarification",
+                        "description": clarify_msg,
+                        "parameters": {"question": clarify_msg, "candidates": [str(p) for p in err.candidates]},
+                        "requires_confirmation": False,
+                    }
+                ],
+                "response": clarify_msg,
+            }
+        except (PathNotFoundError, PathNotAllowedError, FileManagerError) as err:
+            if is_explicit:
+                clarify_msg = (
+                    f"The specified directory '{raw_target}' could not be accessed ({err}). "
+                    "Please check that the path exists and is inside an approved directory."
+                )
+            else:
+                clarify_msg = (
+                    f"I couldn't find a folder matching '{raw_target}' in your known folders "
+                    "(Desktop, Documents, Downloads, Pictures). Where is that folder located?"
+                )
+            return {
+                "steps": [
+                    {
+                        "action": "ask_clarification",
+                        "description": clarify_msg,
+                        "parameters": {"question": clarify_msg},
+                        "requires_confirmation": False,
+                    }
+                ],
+                "response": clarify_msg,
+            }
 
     def create_plan(
         self,

@@ -1,5 +1,5 @@
 # VoxPilot 🎙️🤖
-**Your Local-First AI Desktop Control Assistant (v0.5.4)**
+**Your Local-First AI Desktop Control Assistant (v0.5.5)**
 
 VoxPilot is a privacy-first personal AI desktop assistant for Windows 11. Powered by local LLMs via **Ollama (`qwen3:4b`)** by default—with optional **BYOK (OpenAI)** protected by **Windows DPAPI**—alongside LangGraph agent workflows, local speech processing (**Faster-Whisper** & **Piper TTS**), and native OS/browser automation (**pywinauto**, **PyAutoGUI**, **Playwright**), VoxPilot executes permitted desktop, file, browser, email, and custom automation workflows through natural language voice and text commands.
 

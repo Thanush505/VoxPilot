@@ -6,15 +6,15 @@ This document describes how VoxPilot is packaged from source into a standalone, 
 
 ## 1. Version Authority
 
-All packaging artifacts derive their canonical version from `VERSION` in the repository root (`0.5.4`):
+All packaging artifacts derive their canonical version from `VERSION` in the repository root (`0.5.5`):
 
 | File | Purpose | Version Reference |
 | --- | --- | --- |
-| `VERSION` | Canonical plain-text semantic version | `0.5.4` |
-| `backend/version.py` | Runtime semantic version parser and fallback | `DEFAULT_APP_VERSION = "0.5.4"` |
-| `frontend/package.json` | React/Vite package manifest | `"version": "0.5.4"` |
-| `assets/version_info.txt` | Windows PE `FileVersion` / `ProductVersion` metadata | `0.5.4.0` / `0.5.4` |
-| `installer/VoxPilot.iss` | Reads `..\VERSION` at compile time via `#define MyAppVersion` | `VoxPilotTeam.VoxPilot.DesktopAgent.0.5.4` |
+| `VERSION` | Canonical plain-text semantic version | `0.5.5` |
+| `backend/version.py` | Runtime semantic version parser and fallback | `DEFAULT_APP_VERSION = "0.5.5"` |
+| `frontend/package.json` | React/Vite package manifest | `"version": "0.5.5"` |
+| `assets/version_info.txt` | Windows PE `FileVersion` / `ProductVersion` metadata | `0.5.5.0` / `0.5.5` |
+| `installer/VoxPilot.iss` | Reads `..\VERSION` at compile time via `#define MyAppVersion` | `VoxPilotTeam.VoxPilot.DesktopAgent.0.5.5` |
 
 `VoxPilot.spec` enforces equality between `VERSION` and `backend.version.DEFAULT_APP_VERSION` at analysis time and aborts the build on mismatch.
 

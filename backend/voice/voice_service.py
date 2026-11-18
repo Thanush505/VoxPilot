@@ -7,6 +7,7 @@ customizable Windows global hotkey listener.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -46,9 +47,12 @@ logger = logging.getLogger("voxpilot.voice.service")
 VOICE_SETTINGS_FILENAME = "voice_settings.json"
 
 PHASE_IDLE = "idle"
+PHASE_STARTING = "starting"
 PHASE_LISTENING = "listening"
 PHASE_TRANSCRIBING = "transcribing"
 PHASE_PROCESSING = "processing"
+PHASE_PLANNING = "planning"
+PHASE_EXECUTING = "executing"
 PHASE_SPEAKING = "speaking"
 PHASE_INTERRUPTED = "interrupted"
 PHASE_ERROR = "error"
@@ -132,6 +136,13 @@ class VoiceSettingsManager:
         "wake_word_model": "hey_jarvis_v0.1",
         "wake_word_cooldown_seconds": 2.0,
         "tts_echo_cooldown_seconds": 1.5,
+        "floating_orb_enabled": True,
+        "floating_orb_visible": True,
+        "floating_orb_show_when_idle": False,
+        "floating_orb_corner": "bottom_right",
+        "floating_orb_x": None,
+        "floating_orb_y": None,
+        "floating_orb_animations": True,
     }
 
     def __init__(self, config_path: Optional[Path] = None) -> None:
@@ -203,6 +214,24 @@ class VoiceSettingsManager:
                                 merged["tts_echo_cooldown_seconds"] = max(0.0, min(10.0, float(raw["tts_echo_cooldown_seconds"])))
                             except (TypeError, ValueError):
                                 pass
+                        for bool_key in (
+                            "floating_orb_enabled",
+                            "floating_orb_visible",
+                            "floating_orb_show_when_idle",
+                            "floating_orb_animations",
+                        ):
+                            if bool_key in raw:
+                                merged[bool_key] = bool(raw[bool_key])
+                        if "floating_orb_corner" in raw and isinstance(raw["floating_orb_corner"], str):
+                            corner = raw["floating_orb_corner"].strip().lower()
+                            if corner in ("top_left", "top_right", "bottom_left", "bottom_right", "custom"):
+                                merged["floating_orb_corner"] = corner
+                        for coord_key in ("floating_orb_x", "floating_orb_y"):
+                            if coord_key in raw:
+                                try:
+                                    merged[coord_key] = int(raw[coord_key]) if raw[coord_key] is not None else None
+                                except (TypeError, ValueError):
+                                    merged[coord_key] = None
                 except Exception as exc:
                     logger.warning(f"Failed to read voice settings from {path}: {exc}. Using defaults.")
 
@@ -250,6 +279,23 @@ class VoiceSettingsManager:
                     next_settings["wake_word_cooldown_seconds"] = max(0.5, min(30.0, float(updates["wake_word_cooldown_seconds"])))
                 if "tts_echo_cooldown_seconds" in updates and updates["tts_echo_cooldown_seconds"] is not None:
                     next_settings["tts_echo_cooldown_seconds"] = max(0.0, min(10.0, float(updates["tts_echo_cooldown_seconds"])))
+                for bool_key in (
+                    "floating_orb_enabled",
+                    "floating_orb_visible",
+                    "floating_orb_show_when_idle",
+                    "floating_orb_animations",
+                ):
+                    if bool_key in updates and updates[bool_key] is not None:
+                        next_settings[bool_key] = bool(updates[bool_key])
+                if "floating_orb_corner" in updates and updates["floating_orb_corner"] is not None:
+                    corner = str(updates["floating_orb_corner"]).strip().lower()
+                    if corner not in ("top_left", "top_right", "bottom_left", "bottom_right", "custom"):
+                        raise ValueError(f"Invalid floating orb corner '{corner}'.")
+                    next_settings["floating_orb_corner"] = corner
+                for coord_key in ("floating_orb_x", "floating_orb_y"):
+                    if coord_key in updates:
+                        val = updates[coord_key]
+                        next_settings[coord_key] = int(val) if val is not None else None
 
             path = self.config_path
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -302,6 +348,7 @@ class VoiceService:
         self._is_active: bool = False
         self._phase: str = PHASE_IDLE
         self._stop_event = threading.Event()
+        self._orb_listeners: List[Any] = []
         self._worker_thread: Optional[threading.Thread] = None
         self._active_conversation_id: Optional[str] = None
         self._last_transcript: Optional[str] = None
@@ -372,7 +419,32 @@ class VoiceService:
                 )
             except Exception as notify_err:
                 logger.debug("Non-fatal voice_error notification failure: %s", notify_err)
+        self._notify_orb()
         return event
+
+    def register_orb_listener(self, callback: Any) -> None:
+        """Register a listener notified on voice phase, active-state, or orb-setting changes."""
+        with self._lock:
+            if callback not in self._orb_listeners:
+                self._orb_listeners.append(callback)
+
+    def unregister_orb_listener(self, callback: Any) -> None:
+        """Remove a previously registered orb listener."""
+        with self._lock:
+            self._orb_listeners = [cb for cb in self._orb_listeners if cb is not callback]
+
+    def _notify_orb(self) -> None:
+        """Notify registered floating orb listeners of the latest state and settings."""
+        with self._lock:
+            listeners = list(self._orb_listeners)
+            phase = self._phase
+            is_active = self._is_active
+        settings = self.settings_manager.get_settings()
+        for cb in listeners:
+            try:
+                cb(phase, is_active, settings)
+            except Exception as err:
+                logger.debug("Floating orb listener notification error: %s", err)
 
     def start_hotkey_listener(self) -> bool:
         """Start the global Windows hotkey listener if enabled in settings."""
@@ -804,9 +876,9 @@ class VoiceService:
 
             self._stop_event.clear()
             self._is_active = True
-            self._phase = PHASE_LISTENING
+            self._phase = PHASE_STARTING
             self._last_error = None
-            self._emit_event("voice_started", source=source)
+            self._emit_event("voice_started", source=source, phase=PHASE_STARTING)
 
             self._worker_thread = threading.Thread(
                 target=self._voice_interaction_loop,
@@ -860,15 +932,33 @@ class VoiceService:
                         self._emit_event("voice_stopped", reason=self._last_error)
                     break
 
-                with self._lock:
-                    if not self._is_active or self._stop_event.is_set():
-                        break
-                    self._phase = PHASE_LISTENING
-                    self._emit_event("phase_changed", phase=PHASE_LISTENING)
+                def _mark_capture_active() -> None:
+                    with self._lock:
+                        if not self._is_active or self._stop_event.is_set():
+                            return
+                        if self._phase != PHASE_LISTENING:
+                            self._phase = PHASE_LISTENING
+                            self._emit_event("phase_changed", phase=PHASE_LISTENING)
 
                 # 2. Capture speech from microphone (releases microphone immediately when done or cancelled)
                 try:
-                    audio = self.pipeline.listen(stop_event=self._stop_event)
+                    listen_fn = self.pipeline.listen
+                    listen_sig = inspect.signature(listen_fn)
+                    side_effect_fn = getattr(listen_fn, "side_effect", None)
+                    supports_capture_cb = "on_capture_active" in listen_sig.parameters
+                    if not supports_capture_cb and callable(side_effect_fn):
+                        try:
+                            supports_capture_cb = "on_capture_active" in inspect.signature(side_effect_fn).parameters
+                        except (TypeError, ValueError):
+                            supports_capture_cb = False
+                    if supports_capture_cb:
+                        audio = listen_fn(
+                            stop_event=self._stop_event,
+                            on_capture_active=_mark_capture_active,
+                        )
+                    else:
+                        _mark_capture_active()
+                        audio = listen_fn(stop_event=self._stop_event)
                 except AudioRecorderError as rec_err:
                     if self._stop_event.is_set():
                         break
@@ -1102,7 +1192,16 @@ class VoiceService:
                 else:
                     self.stop_wake_word_listener()
 
+            self._notify_orb()
             return self.get_status()
+
+    def set_phase(self, phase: str, **payload: Any) -> None:
+        """Update the current voice phase (e.g. planning, executing) and notify listeners."""
+        with self._lock:
+            if not self._is_active and phase not in (PHASE_IDLE, PHASE_ERROR):
+                return
+            self._phase = phase
+            self._emit_event("phase_changed", phase=phase, **payload)
 
     def update_shortcut(self, shortcut: str, enabled: Optional[bool] = None) -> Dict[str, Any]:
         """

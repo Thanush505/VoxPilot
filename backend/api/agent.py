@@ -892,6 +892,13 @@ class VoiceConfigUpdateRequest(BaseModel):
     streaming_vad_enabled: Optional[bool] = Field(None, description="Enable or disable dynamic WebRTC streaming VAD.")
     wake_word_enabled: Optional[bool] = Field(None, description="Enable or disable optional openWakeWord activation.")
     wake_word_cooldown_seconds: Optional[float] = Field(None, ge=0.5, le=30.0, description="Cooldown seconds between wake-word activations.")
+    floating_orb_enabled: Optional[bool] = Field(None, description="Enable or disable the global floating voice orb.")
+    floating_orb_visible: Optional[bool] = Field(None, description="Show or hide the floating voice orb without stopping voice mode.")
+    floating_orb_show_when_idle: Optional[bool] = Field(None, description="Keep the floating orb visible even when voice mode is idle.")
+    floating_orb_corner: Optional[str] = Field(None, description="Preferred screen corner: top_left, top_right, bottom_left, bottom_right, or custom.")
+    floating_orb_x: Optional[int] = Field(None, description="Optional custom X screen coordinate for the floating orb.")
+    floating_orb_y: Optional[int] = Field(None, description="Optional custom Y screen coordinate for the floating orb.")
+    floating_orb_animations: Optional[bool] = Field(None, description="Enable or disable floating orb animations.")
 
 
 class VoiceShortcutUpdateRequest(BaseModel):
@@ -1086,6 +1093,75 @@ async def list_piper_voices_endpoint():
     return {
         "voices": list_available_piper_voices(),
     }
+
+
+class OrbPanelRequest(BaseModel):
+    expanded: bool = Field(..., description="Whether the compact floating orb status panel is expanded.")
+
+
+class OrbPositionRequest(BaseModel):
+    corner: Optional[str] = Field(None, description="Screen corner (top_left, top_right, bottom_left, bottom_right, custom).")
+    x: Optional[int] = Field(None, description="Optional custom X coordinate.")
+    y: Optional[int] = Field(None, description="Optional custom Y coordinate.")
+
+
+@router.post("/voice/orb/show")
+async def show_floating_orb_endpoint(http_request: Request):
+    """Restore/show the floating voice orb without altering active voice mode."""
+    _verify_trusted_request(http_request)
+    voice_service = get_shared_voice_service()
+    return await anyio.to_thread.run_sync(
+        functools.partial(voice_service.update_config, {"floating_orb_visible": True})
+    )
+
+
+@router.post("/voice/orb/hide")
+async def hide_floating_orb_endpoint(http_request: Request):
+    """Hide the floating voice orb without disabling or stopping voice mode."""
+    _verify_trusted_request(http_request)
+    voice_service = get_shared_voice_service()
+    return await anyio.to_thread.run_sync(
+        functools.partial(voice_service.update_config, {"floating_orb_visible": False})
+    )
+
+
+@router.post("/voice/orb/panel")
+async def set_floating_orb_panel_endpoint(
+    http_request: Request,
+    req: OrbPanelRequest,
+):
+    """Expand or collapse the compact floating orb status panel window."""
+    _verify_trusted_request(http_request)
+    from backend.desktop.shell import get_shared_desktop_controller
+
+    voice_service = get_shared_voice_service()
+    desktop = get_shared_desktop_controller()
+    if desktop is not None:
+        desktop.orb_controller.set_panel_expanded(
+            req.expanded,
+            voice_service.settings_manager.get_settings(),
+        )
+    return {"expanded": req.expanded}
+
+
+@router.post("/voice/orb/position")
+async def update_floating_orb_position_endpoint(
+    http_request: Request,
+    req: OrbPositionRequest,
+):
+    """Reposition the floating voice orb and persist the preference."""
+    _verify_trusted_request(http_request)
+    voice_service = get_shared_voice_service()
+    updates: Dict[str, Any] = {}
+    if req.corner is not None:
+        updates["floating_orb_corner"] = req.corner
+    if req.x is not None:
+        updates["floating_orb_x"] = req.x
+    if req.y is not None:
+        updates["floating_orb_y"] = req.y
+    return await anyio.to_thread.run_sync(
+        functools.partial(voice_service.update_config, updates)
+    )
 
 
 # ==============================================================================

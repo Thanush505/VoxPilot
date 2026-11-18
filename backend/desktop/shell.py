@@ -20,6 +20,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from backend.desktop.floating_orb import FloatingOrbController
 from backend.paths import get_app_icon_path, get_log_dir, get_user_data_dir, get_webview_storage_dir
 from backend.version import get_app_version
 
@@ -843,6 +844,11 @@ class DesktopShellController:
         self._window_minimized = False
         self._hwnd: Optional[int] = None
         self._ready_thread: Optional[threading.Thread] = None
+        self._orb_controller = FloatingOrbController()
+
+    @property
+    def orb_controller(self) -> FloatingOrbController:
+        return self._orb_controller
 
     @property
     def base_url(self) -> str:
@@ -930,6 +936,23 @@ class DesktopShellController:
         except Exception:
             pass
 
+    def _on_orb_window_loaded(self, *args: Any, **kwargs: Any) -> None:
+        """Inject the desktop session token into the floating orb WebView2 window."""
+        if not self.require_session_token or not self._orb_controller.has_window:
+            return
+        try:
+            script = (
+                "try { "
+                f"window.__VOXPILOT_DESKTOP_TOKEN__ = {json.dumps(self.session_token)}; "
+                "window.dispatchEvent(new Event('voxpilot:token-ready')); "
+                "} catch (e) {}"
+            )
+            win = getattr(self._orb_controller, "_window", None)
+            if win is not None and hasattr(win, "evaluate_js"):
+                win.evaluate_js(script)
+        except Exception:
+            pass
+
     def _on_window_closed(self, *args: Any, **kwargs: Any) -> None:
         self._closing_event.set()
         self._window_active = False
@@ -958,6 +981,15 @@ class DesktopShellController:
                 self._window.load_url(f"{self.base_url}/")
             except Exception as exc:
                 logger.warning("Failed to navigate desktop window to %s: %s", self.base_url, exc)
+            try:
+                from backend.voice.voice_service import get_shared_voice_service
+
+                vs = get_shared_voice_service()
+                vs.register_orb_listener(self._orb_controller.sync_state)
+                self._orb_controller.load_url(f"{self.base_url}/?orb=1")
+                self._orb_controller.sync_state(vs.phase, vs.is_active, vs.settings_manager.get_settings())
+            except Exception as orb_exc:
+                logger.debug("Floating orb initialization warning: %s", orb_exc)
         else:
             err_detail = (
                 str(self.server.startup_error)
@@ -1007,6 +1039,7 @@ class DesktopShellController:
                     destroy_fn()
                 except Exception:
                     pass
+        self._orb_controller.destroy()
         if self.server is not None:
             self.server.stop(timeout=10.0)
         self._stopped_event.set()
@@ -1018,6 +1051,7 @@ class DesktopShellController:
         self._window_focused = False
         self._window_minimized = False
         self._set_ui_activity(False)
+        self._orb_controller.destroy()
         if self.server is not None:
             self.server.stop(timeout=10.0)
         self._stopped_event.set()
@@ -1102,6 +1136,23 @@ class DesktopShellController:
             daemon=True,
         )
         self._ready_thread.start()
+
+        try:
+            from backend.voice.voice_service import get_shared_voice_service
+            orb_settings = get_shared_voice_service().settings_manager.get_settings()
+        except Exception:
+            orb_settings = {}
+        orb_win = self._orb_controller.create_orb_window(
+            webview,
+            "<!doctype html><html><body style='margin:0;background:transparent;overflow:hidden;'></body></html>",
+            settings=orb_settings,
+        )
+        orb_events = getattr(orb_win, "events", None)
+        if orb_events is not None and getattr(orb_events, "loaded", None) is not None:
+            try:
+                orb_events.loaded += self._on_orb_window_loaded
+            except Exception:
+                pass
 
         webview_storage_dir = get_webview_storage_dir()
         icon_path = get_app_icon_path()

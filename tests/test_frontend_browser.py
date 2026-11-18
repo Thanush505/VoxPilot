@@ -381,3 +381,24 @@ class TestFrontendBrowserIntegration:
         page.wait_for_selector("header .health-pill.disconnected", timeout=10000)
         assert page.locator("header .health-pill.disconnected").is_visible()
         page.close()
+
+
+def test_dashboard_spacing_and_unavailable_provider(static_server, browser_instance, tmp_path):
+    page = browser_instance.new_page(viewport={"width": 1440, "height": 1000})
+    setup_default_mock_routes(page)
+    page.route("**/api/providers/active*", lambda route: route.fulfill(json={
+        "profile_config": {"active_provider_id": "local", "local_model": "qwen3:4b"},
+        "health": {"available": False, "active_model": "qwen3:4b"},
+    }))
+    page.goto(static_server)
+    page.get_by_test_id("dashboard-command-center").wait_for()
+    page.wait_for_function("document.querySelector('.vp-dashboard').innerText.includes('AI Unavailable')")
+    sections = page.locator(".vp-dashboard > *").evaluate_all(
+        "els => els.map(e => { const r = e.getBoundingClientRect(); return {top:r.top,bottom:r.bottom}; })"
+    )
+    assert all(b["top"] - a["bottom"] >= 15 for a, b in zip(sections, sections[1:]))
+    page.screenshot(path=str(tmp_path / "dashboard-desktop.png"), full_page=True)
+    print(f"Dashboard preview: {tmp_path / 'dashboard-desktop.png'}")
+    page.set_viewport_size({"width": 390, "height": 844})
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    page.close()

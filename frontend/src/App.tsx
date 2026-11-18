@@ -9,6 +9,7 @@ import AutomationPage from './pages/AutomationPage';
 import AuditLogsPage from './pages/AuditLogsPage';
 import SettingsPage from './pages/SettingsPage';
 import UpcomingSection from './components/common/UpcomingSection';
+import FloatingVoiceOrb from './components/voice/FloatingVoiceOrb';
 import useBackendHealth from './hooks/useBackendHealth';
 import apiClient, { resolveDesktopSessionToken } from './api/client';
 import { ProfileItem } from './api/types';
@@ -20,7 +21,7 @@ import './styles/redesign.css';
 
 const UPCOMING_DESCRIPTIONS: Record<string, { title: string; description: string; phase: string }> = {};
 
-export function App() {
+function MainShellApp() {
   const [currentNav, setCurrentNav] = useState<string>('dashboard');
   const [agentSpecialistMode, setAgentSpecialistMode] = useState<AgentSpecialistMode>('all');
   const [pendingAgentPrompt, setPendingAgentPrompt] = useState<string | null>(null);
@@ -238,6 +239,16 @@ export function App() {
       </AppLayout>
     </AICoreProvider>
   );
+}
+
+export function App() {
+  const isOrbMode =
+    typeof window !== 'undefined' &&
+    new URLSearchParams(window.location.search).get('orb') === '1';
+  if (isOrbMode) {
+    return <FloatingVoiceOrb />;
+  }
+  return <MainShellApp />;
 }
 
 export default App;

@@ -641,3 +641,32 @@ def test_tools_path_not_allowed_status(file_manager: FileManager, tmp_path: Path
     assert res.status == "not_allowed"
     assert "outside approved directories" in res.message
 
+
+
+@pytest.mark.parametrize("name", ["Major Project", "major_project", "MAJOR-PROJECT"])
+def test_resolve_folder_name_for_listing(file_manager, test_workspace, name):
+    folder = test_workspace / "Major Project"
+    folder.mkdir()
+    (folder / "notes.txt").write_text("notes")
+    assert [item.name for item in file_manager.list_directory(name)] == ["notes.txt"]
+
+
+def test_folder_name_ambiguity_requires_full_path(file_manager, test_workspace):
+    for parent in ("one", "two"):
+        (test_workspace / parent / "Major Project").mkdir(parents=True)
+    with pytest.raises(InvalidOperationError, match="Multiple folders"):
+        file_manager.list_directory("Major_Project")
+
+
+def test_folder_lookup_excludes_protected_project(file_manager, mock_project_root):
+    with pytest.raises(PathNotFoundError):
+        file_manager.resolve_directory(mock_project_root.name)
+
+
+def test_onedrive_redirected_folders_are_approved(tmp_path, monkeypatch):
+    from backend.automation.file_manager import get_default_approved_directories
+    cloud = tmp_path / "cloud"
+    desktop = cloud / "Desktop"
+    desktop.mkdir(parents=True)
+    monkeypatch.setenv("OneDrive", str(cloud))
+    assert desktop.resolve() in get_default_approved_directories()

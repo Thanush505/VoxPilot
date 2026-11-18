@@ -10,13 +10,205 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import sys
 import logging
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Union
 
 logger = logging.getLogger(__name__)
+
+
+# ==============================================================================
+# Windows Known Folder Resolution and Unique Filename Helpers
+# ==============================================================================
+
+KNOWN_FOLDER_GUIDS: Dict[str, str] = {
+    "desktop": "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}",
+    "downloads": "{374DE290-123F-4565-9164-39C4925E467B}",
+    "documents": "{FDD39AD0-238F-46AF-ADB4-6C85480369C7}",
+    "pictures": "{33E28130-4E1E-4676-835A-98395C3BC3BB}",
+    "music": "{4BD8D571-6D19-48D3-BE97-422220080E43}",
+    "videos": "{18989B1D-99B5-455B-841C-AB7C74E4DDFC}",
+}
+
+_FOLDER_ALIAS_MAP: Dict[str, str] = {
+    "desktop": "desktop",
+    "downloads": "downloads",
+    "download": "downloads",
+    "documents": "documents",
+    "document": "documents",
+    "docs": "documents",
+    "pictures": "pictures",
+    "picture": "pictures",
+    "pics": "pictures",
+    "photos": "pictures",
+    "music": "music",
+    "videos": "videos",
+    "video": "videos",
+}
+
+_FOLDER_DEFAULT_NAMES: Dict[str, str] = {
+    "desktop": "Desktop",
+    "downloads": "Downloads",
+    "documents": "Documents",
+    "pictures": "Pictures",
+    "music": "Music",
+    "videos": "Videos",
+}
+
+
+def normalize_folder_name(value: str) -> str:
+    """Normalize a folder name for case-insensitive and separator-insensitive matching."""
+    return re.sub(r"[\s_-]+", " ", value).strip().casefold()
+
+
+def extract_folder_query(raw_hint: str) -> tuple[str, Optional[str]]:
+    """Parse a natural-language folder phrase into (folder_name, optional_parent_hint)."""
+    cleaned = str(raw_hint or "").strip().strip("'\"").rstrip(".,!?;:")
+    if not cleaned:
+        return "", None
+
+    def _strip_wrapper(text: str) -> str:
+        s = text.strip().strip("'\"").rstrip(".,!?;:")
+        for _ in range(3):
+            updated = re.sub(r"^(?:my|the|an?|this)\s+", "", s, flags=re.IGNORECASE).strip()
+            if updated == s:
+                break
+            s = updated
+        s = re.sub(r"\s+(?:folder|directory|dir)$", "", s, flags=re.IGNORECASE).strip()
+        return s
+
+    # Handle nested phrasing like "Major Project folder inside Documents"
+    if not any(c in cleaned for c in ("/", "\\", ":")):
+        nested = re.match(
+            r"^(?P<child>.+?)\s+(?:inside|in|under|within|from)\s+(?P<parent>.+?)$",
+            cleaned,
+            re.IGNORECASE,
+        )
+        if nested:
+            child = _strip_wrapper(nested.group("child"))
+            parent = _strip_wrapper(nested.group("parent"))
+            if child and parent:
+                return child, parent
+
+    return _strip_wrapper(cleaned), None
+
+
+def normalize_folder_alias(location_hint: Optional[str]) -> Optional[str]:
+    """Normalize a natural-language folder destination into a canonical known-folder key."""
+    if not location_hint:
+        return None
+    cleaned = location_hint.strip().strip("'\"").rstrip(".,!?;:").lower()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    # Strip leading prepositions and possessive/article prefixes
+    for _ in range(3):
+        updated = re.sub(
+            r"^(?:in|on|to|into|at|inside|under|within|my|the|user(?:'s)?)\s+",
+            "",
+            cleaned,
+        ).strip()
+        if updated == cleaned:
+            break
+        cleaned = updated
+    cleaned = re.sub(r"\s+(?:folder|directory|dir)$", "", cleaned).strip()
+    return _FOLDER_ALIAS_MAP.get(cleaned)
+
+
+def _get_windows_known_folder_path(folder_key: str) -> Optional[Path]:
+    """Query Windows SHGetKnownFolderPath for the current user's actual known folder."""
+    if sys.platform != "win32":
+        return None
+    guid_str = KNOWN_FOLDER_GUIDS.get(folder_key)
+    if not guid_str:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", ctypes.c_ulong),
+                ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        parsed = uuid.UUID(guid_str)
+        data1, data2, data3, data4_1, data4_2, node = parsed.fields
+        node_bytes = node.to_bytes(6, "big")
+        guid = _GUID(
+            data1,
+            data2,
+            data3,
+            (ctypes.c_ubyte * 8)(data4_1, data4_2, *node_bytes),
+        )
+
+        p_path = ctypes.c_wchar_p()
+        shell32 = ctypes.windll.shell32
+        ole32 = ctypes.windll.ole32
+        shell32.SHGetKnownFolderPath.argtypes = [
+            ctypes.POINTER(_GUID),
+            wintypes.DWORD,
+            wintypes.HANDLE,
+            ctypes.POINTER(ctypes.c_wchar_p),
+        ]
+        shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+        ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+
+        hr = shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(p_path))
+        try:
+            if hr == 0 and p_path.value:
+                return Path(p_path.value).resolve()
+        finally:
+            if p_path.value:
+                ole32.CoTaskMemFree(p_path)
+    except Exception as err:
+        logger.debug(f"SHGetKnownFolderPath fallback for '{folder_key}': {err}")
+    return None
+
+
+def resolve_known_folder(location_hint: Optional[str]) -> Optional[Path]:
+    """Resolve a natural-language Windows user folder alias to its actual directory Path."""
+    canonical = normalize_folder_alias(location_hint)
+    if not canonical:
+        return None
+
+    win_path = _get_windows_known_folder_path(canonical)
+    if win_path is not None:
+        return win_path
+
+    home = Path.home().resolve()
+    folder_name = _FOLDER_DEFAULT_NAMES[canonical]
+    if canonical in ("desktop", "documents", "pictures"):
+        for base in (
+            os.environ.get("OneDrive"),
+            os.environ.get("OneDriveConsumer"),
+            os.environ.get("OneDriveCommercial"),
+            str(home / "OneDrive"),
+        ):
+            if base:
+                candidate = (Path(base) / folder_name).resolve()
+                if candidate.is_dir():
+                    return candidate
+    return (home / folder_name).resolve()
+
+
+def generate_unique_filename(directory: Path, filename: str) -> Path:
+    """Return a non-colliding file Path in directory, appending ' (2)', ' (3)', ... if needed."""
+    candidate = directory / filename
+    if not candidate.exists():
+        return candidate
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    index = 2
+    while True:
+        alt = directory / f"{stem} ({index}){suffix}"
+        if not alt.exists():
+            return alt
+        index += 1
 
 
 # ==============================================================================
@@ -35,16 +227,26 @@ def get_default_approved_directories() -> List[Path]:
       - Videos
     """
     home = Path.home().resolve()
-    candidates = [
+    candidates: List[Path] = []
+    for key in KNOWN_FOLDER_GUIDS:
+        resolved_known = resolve_known_folder(key)
+        if resolved_known is not None:
+            candidates.append(resolved_known)
+    candidates.extend([
         home / "Documents",
         home / "Downloads",
         home / "Desktop",
         home / "Pictures",
         home / "Music",
         home / "Videos",
-    ]
+    ])
+    # OneDrive redirects common Windows folders away from the profile root.
+    for base in {os.environ.get("OneDrive"), os.environ.get("OneDriveConsumer"),
+                 os.environ.get("OneDriveCommercial"), str(home / "OneDrive")}:
+        if base:
+            candidates.extend(Path(base) / name for name in ("Desktop", "Documents", "Pictures"))
     # Filter to existing directories or create a standard user-space workspace
-    approved = [c.resolve() for c in candidates if c.exists()]
+    approved = list(dict.fromkeys(c.resolve() for c in candidates if c.is_dir()))
     if not approved:
         # Fallback to home/Documents or dedicated folder
         docs = home / "Documents"
@@ -130,6 +332,13 @@ class FileAccessError(FileManagerError):
 class InvalidOperationError(FileManagerError):
     """Raised when an operation is invalid (e.g. file operation on directory, or invalid name)."""
     pass
+
+
+class AmbiguousDirectoryError(InvalidOperationError):
+    """Raised when a folder name matches multiple existing directories."""
+    def __init__(self, message: str, candidates: Optional[List[Path]] = None):
+        super().__init__(message)
+        self.candidates = candidates or []
 
 
 # ==============================================================================
@@ -371,6 +580,82 @@ class FileManager:
     # 1. List Files and Folders
     # --------------------------------------------------------------------------
 
+    def resolve_directory(self, raw_path: Union[str, Path]) -> Path:
+        """Resolve a directory path or natural-language folder name within approved roots."""
+        name = str(raw_path).strip().strip('"').strip("'")
+        path = Path(name)
+        # Explicit paths must pass the usual checks, never a fuzzy fallback.
+        if path.is_absolute() or any(c in name for c in ("/", "\\", ":")) or name in (".", ".."):
+            return self.validate_path(name, must_exist=True)
+        if not name or "\0" in name:
+            return self.validate_path(name, must_exist=True)
+
+        folder_query, parent_hint = extract_folder_query(name)
+        if not folder_query:
+            raise PathNotFoundError("Folder name cannot be empty.")
+
+        if parent_hint:
+            parent_dir = self.resolve_directory(parent_hint)
+            search_roots = [parent_dir]
+        else:
+            known = resolve_known_folder(folder_query)
+            if known is not None and known.is_dir():
+                try:
+                    return self.validate_path(known, must_exist=True)
+                except (PathNotAllowedError, PathNotFoundError):
+                    pass
+            search_roots = list(self._approved_directories)
+
+        wanted = normalize_folder_name(folder_query)
+        if not parent_hint:
+            roots = [root for root in search_roots if normalize_folder_name(root.name) == wanted]
+            if len(roots) == 1:
+                return self.validate_path(roots[0], must_exist=True)
+
+        matches: set[Path] = set()
+        queue = [(root, 0) for root in search_roots]
+        visited: set[Path] = set()
+        scanned_dirs = 0
+        skip_names = {"node_modules", "__pycache__", "venv", ".venv", ".git", "dist", "build", "site-packages"}
+        while queue:
+            directory, depth = queue.pop(0)
+            try:
+                directory = self.validate_path(directory, must_exist=True)
+                if directory in visited:
+                    continue
+                visited.add(directory)
+                if normalize_folder_name(directory.name) == wanted:
+                    matches.add(directory)
+                if depth >= DEFAULT_SEARCH_DEPTH:
+                    continue
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                        if entry.name.startswith(".") or entry.name.casefold() in skip_names:
+                            continue
+                        scanned_dirs += 1
+                        if scanned_dirs > MAX_SEARCH_SCANNED_ITEMS:
+                            raise InvalidOperationError(
+                                "Folder search limit reached. Please provide the full folder path."
+                            )
+                        queue.append((Path(entry.path), depth + 1))
+            except (PathNotAllowedError, PathNotFoundError, OSError):
+                continue
+
+        if len(matches) > 1:
+            sorted_matches = sorted(matches)
+            options = "; ".join(str(p) for p in sorted_matches)
+            raise AmbiguousDirectoryError(
+                f"Multiple folders match '{folder_query}': {options}. Please specify which full path you want.",
+                candidates=sorted_matches,
+            )
+        if matches:
+            return matches.pop()
+        raise PathNotFoundError(
+            f"Could not find folder '{folder_query}' in approved locations. Where is it located?"
+        )
+
     def list_directory(
         self,
         dir_path: Union[str, Path],
@@ -385,7 +670,7 @@ class FileManager:
         Returns:
             List[FileInfo]: Sorted list of items in the directory.
         """
-        validated_dir = self.validate_path(dir_path, must_exist=True)
+        validated_dir = self.resolve_directory(dir_path)
         if not validated_dir.is_dir():
             raise InvalidOperationError(f"Target path is not a directory: {validated_dir}")
 
@@ -440,7 +725,7 @@ class FileManager:
         Returns:
             List[FileInfo]: Matching files and folders up to max_results.
         """
-        validated_dir = self.validate_path(dir_path, must_exist=True)
+        validated_dir = self.resolve_directory(dir_path)
         if not validated_dir.is_dir():
             raise InvalidOperationError(f"Search target is not a directory: {validated_dir}")
 
@@ -575,6 +860,7 @@ class FileManager:
         file_path: Union[str, Path],
         confirm_overwrite: bool = False,
         content: Optional[str] = None,
+        auto_rename_on_conflict: bool = False,
     ) -> Dict[str, Any]:
         """Create a new file in an approved directory, optionally with initial text content.
 
@@ -582,6 +868,7 @@ class FileManager:
             file_path: Path of the file to create.
             confirm_overwrite: Must be True to overwrite if file already exists.
             content: Optional UTF-8 text content to write into the file.
+            auto_rename_on_conflict: When True, pick a unique non-existing filename if target exists.
 
         Returns:
             Dict[str, Any]: Execution result.
@@ -590,13 +877,17 @@ class FileManager:
         already_exists = validated_path.exists()
 
         if already_exists:
-            if not confirm_overwrite:
+            if auto_rename_on_conflict and not confirm_overwrite:
+                unique_candidate = generate_unique_filename(validated_path.parent, validated_path.name)
+                validated_path = self.validate_path(unique_candidate, must_exist=False, check_parent_if_new=True)
+                already_exists = validated_path.exists()
+            elif not confirm_overwrite:
                 raise ConfirmationRequiredError(
                     f"File '{validated_path.name}' already exists. Overwrite requires explicit confirmation.",
                     target=str(validated_path),
                     operation="create_file_overwrite",
                 )
-            if validated_path.is_dir():
+            elif validated_path.is_dir():
                 raise InvalidOperationError(f"Cannot overwrite directory with a file: {validated_path}")
 
         try:

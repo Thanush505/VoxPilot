@@ -330,7 +330,7 @@ class AudioRecorder:
             f"Could not find a supported recording configuration for device {device_idx}."
         )
 
-    def record(self, duration=5, stop_event=None):
+    def record(self, duration=5, stop_event=None, on_capture_active=None):
         """Record audio for a fixed duration, automatically resampling to 16 kHz mono if needed.
 
         Args:
@@ -360,6 +360,8 @@ class AudioRecorder:
                 dtype="float32",
                 device=device_idx,
             )
+            if callable(on_capture_active):
+                on_capture_active()
             sd.wait()
 
             if self._cancel_event.is_set() or (stop_event is not None and stop_event.is_set()):
@@ -416,7 +418,7 @@ class AudioRecorder:
         self.save_recording(audio, filename)
         return audio
 
-    def record_until_silence(self, max_duration=None, start_timeout=None, stop_event=None):
+    def record_until_silence(self, max_duration=None, start_timeout=None, stop_event=None, on_capture_active=None):
         """Record audio dynamically, automatically stopping when the user finishes speaking.
 
         Uses real-time WebRTC Voice Activity Detection (StreamingVAD) to detect speech onset,
@@ -433,8 +435,8 @@ class AudioRecorder:
         """
         if not self.streaming_vad_enabled:
             fallback_duration = max_duration if max_duration is not None else 5
-            if stop_event is not None:
-                return self.record(duration=fallback_duration, stop_event=stop_event)
+            if stop_event is not None or on_capture_active is not None:
+                return self.record(duration=fallback_duration, stop_event=stop_event, on_capture_active=on_capture_active)
             return self.record(duration=fallback_duration)
 
         self._cancel_event.clear()
@@ -485,6 +487,8 @@ class AudioRecorder:
                 device=device_idx,
                 callback=stream_callback,
             ) as stream:
+                if callable(on_capture_active) and stream.active:
+                    on_capture_active()
                 while not vad.is_finished():
                     if self._cancel_event.is_set() or (stop_event is not None and stop_event.is_set()):
                         print("Recording cancelled by user.")

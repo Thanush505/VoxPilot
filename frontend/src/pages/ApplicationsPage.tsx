@@ -166,7 +166,7 @@ export const ApplicationsPage: React.FC<ApplicationsPageProps> = ({
           setStatusBanner({
             type: 'success',
             message:
-              data.message || `Successfully launched ${app.display_name}.`,
+              data.message || `${app.display_name} launched successfully.`,
           });
         } else {
           setStatusBanner({

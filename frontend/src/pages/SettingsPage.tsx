@@ -514,6 +514,25 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     }
   };
 
+  const handleUpdateOrbSetting = async (
+    updates: Record<string, unknown>,
+    successMessage: string
+  ) => {
+    setIsSaving(true);
+    setFeedbackMsg(null);
+    try {
+      const res = await apiClient.updateVoiceConfig(updates);
+      if (res.ok && res.data) {
+        setVoiceStatus(res.data);
+        setFeedbackMsg({ type: 'success', text: successMessage });
+      } else {
+        setFeedbackMsg({ type: 'error', text: res.error || 'Failed to update floating orb settings.' });
+      }
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   const settings = voiceStatus?.settings;
   const shortcutStatus = voiceStatus?.shortcut_status;
   const components = voiceStatus?.components;
@@ -991,6 +1010,134 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                     Zero background recording when Voice Mode is off
                   </div>
                 </div>
+              </div>
+            </div>
+
+            {/* Global Floating Voice Orb Settings */}
+            <div className="dashboard-card" data-testid="floating-orb-settings-card">
+              <div className="dashboard-card-header">
+                <div className="dashboard-card-title-group">
+                  <Sparkles size={18} />
+                  <div>
+                    <h2 className="dashboard-card-title">Global Floating Voice Orb</h2>
+                    <p className="dashboard-card-description">
+                      Always-on-top compact indicator shown across Windows apps when global voice mode is active.
+                    </p>
+                  </div>
+                </div>
+                {settings?.floating_orb_visible === false && (
+                  <button
+                    type="button"
+                    className="btn-save-shortcut"
+                    disabled={!isBackendConnected || isSaving}
+                    onClick={() =>
+                      handleUpdateOrbSetting({ floating_orb_visible: true }, 'Floating voice orb restored.')
+                    }
+                    data-testid="restore-floating-orb-btn"
+                  >
+                    Restore Orb
+                  </button>
+                )}
+              </div>
+
+              <div className="settings-row">
+                <div className="settings-row-info">
+                  <div className="settings-row-title">Enable Global Floating Orb</div>
+                  <div className="settings-row-subtitle">
+                    Show a compact non-focus-stealing orb when Voice Mode is triggered via global shortcut.
+                  </div>
+                </div>
+                <label className="toggle-switch">
+                  <input
+                    type="checkbox"
+                    checked={settings?.floating_orb_enabled ?? true}
+                    onChange={(e) =>
+                      handleUpdateOrbSetting(
+                        { floating_orb_enabled: e.target.checked },
+                        e.target.checked ? 'Global floating orb enabled.' : 'Global floating orb disabled.'
+                      )
+                    }
+                    disabled={!isBackendConnected || isSaving}
+                    data-testid="toggle-floating-orb-enabled"
+                  />
+                  <span>{settings?.floating_orb_enabled ?? true ? 'Enabled' : 'Disabled'}</span>
+                </label>
+              </div>
+
+              <div className="settings-row">
+                <div className="settings-row-info">
+                  <div className="settings-row-title">Show When Idle</div>
+                  <div className="settings-row-subtitle">
+                    Keep the floating orb visible on screen even when Voice Mode is inactive.
+                  </div>
+                </div>
+                <label className="toggle-switch">
+                  <input
+                    type="checkbox"
+                    checked={settings?.floating_orb_show_when_idle ?? false}
+                    onChange={(e) =>
+                      handleUpdateOrbSetting(
+                        { floating_orb_show_when_idle: e.target.checked },
+                        e.target.checked
+                          ? 'Floating orb will remain visible when idle.'
+                          : 'Floating orb will appear only while voice mode is active.'
+                      )
+                    }
+                    disabled={!isBackendConnected || isSaving}
+                    data-testid="toggle-floating-orb-idle"
+                  />
+                  <span>{settings?.floating_orb_show_when_idle ? 'Always Visible' : 'Active Only'}</span>
+                </label>
+              </div>
+
+              <div className="settings-row">
+                <div className="settings-row-info">
+                  <div className="settings-row-title">Orb Animations</div>
+                  <div className="settings-row-subtitle">
+                    Enable smooth glow, pulse, and audio-reactive animations (also respects OS reduced motion).
+                  </div>
+                </div>
+                <label className="toggle-switch">
+                  <input
+                    type="checkbox"
+                    checked={settings?.floating_orb_animations ?? true}
+                    onChange={(e) =>
+                      handleUpdateOrbSetting(
+                        { floating_orb_animations: e.target.checked },
+                        e.target.checked ? 'Floating orb animations enabled.' : 'Floating orb animations disabled.'
+                      )
+                    }
+                    disabled={!isBackendConnected || isSaving}
+                    data-testid="toggle-floating-orb-animations"
+                  />
+                  <span>{settings?.floating_orb_animations ?? true ? 'Animated' : 'Reduced'}</span>
+                </label>
+              </div>
+
+              <div className="settings-row">
+                <div className="settings-row-info">
+                  <div className="settings-row-title">Screen Corner Position</div>
+                  <div className="settings-row-subtitle">
+                    Choose which corner of your primary monitor hosts the floating orb.
+                  </div>
+                </div>
+                <select
+                  className="settings-select"
+                  value={settings?.floating_orb_corner || 'bottom_right'}
+                  onChange={(e) =>
+                    handleUpdateOrbSetting(
+                      { floating_orb_corner: e.target.value },
+                      `Floating orb corner updated to ${e.target.value.replace('_', ' ')}.`
+                    )
+                  }
+                  disabled={!isBackendConnected || isSaving}
+                  data-testid="select-floating-orb-corner"
+                >
+                  <option value="bottom_right">Bottom Right</option>
+                  <option value="bottom_left">Bottom Left</option>
+                  <option value="top_right">Top Right</option>
+                  <option value="top_left">Top Left</option>
+                </select>
               </div>
             </div>
           </div>

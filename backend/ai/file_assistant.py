@@ -679,23 +679,12 @@ class FileAssistantService:
         """Resolve common user folder aliases ('Downloads', 'Documents', 'Desktop', etc.)."""
         if not location_hint:
             return None
+        from backend.automation.file_manager import resolve_known_folder
+        known = resolve_known_folder(location_hint)
+        if known is not None and known.exists():
+            return known
         cleaned = location_hint.strip().strip("'\"").lower()
         approved = get_default_approved_directories()
-        home = Path.home()
-        aliases = {
-            "documents": home / "Documents",
-            "docs": home / "Documents",
-            "downloads": home / "Downloads",
-            "desktop": home / "Desktop",
-            "pictures": home / "Pictures",
-            "music": home / "Music",
-            "videos": home / "Videos",
-        }
-        if cleaned in aliases:
-            candidate = aliases[cleaned].resolve()
-            if candidate.exists():
-                return candidate
-        # Try direct path if inside approved dirs
         for d in approved:
             if d.name.lower() == cleaned and d.exists():
                 return d

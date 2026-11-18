@@ -190,7 +190,6 @@ export const AutomationPage: React.FC<AutomationPageProps> = ({
                       <th>Description</th>
                       <th>Status</th>
                       <th>Started</th>
-                      <th>PIDs</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -206,9 +205,6 @@ export const AutomationPage: React.FC<AutomationPageProps> = ({
                         </td>
                         <td className="text-xs text-muted">
                           {op.start_time ? new Date(op.start_time * 1000).toLocaleTimeString() : 'N/A'}
-                        </td>
-                        <td className="font-mono text-xs">
-                          {op.pids && op.pids.length > 0 ? op.pids.join(', ') : 'None'}
                         </td>
                       </tr>
                     ))}

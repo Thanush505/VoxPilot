@@ -6,6 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.5.5] - 2026-11-19
+
+### Added
+- **Global Floating Voice Orb:** Compact, frameless, always-on-top, non-focus-stealing PyWebView companion orb (`Ctrl + Shift + V`) with Win32 `WS_EX_NOACTIVATE` / `WS_EX_TOOLWINDOW` / `WS_EX_TOPMOST` support, multi-monitor work-area positioning, real-time voice states (`idle`, `starting`, `listening`, `processing`, `planning`, `executing`, `speaking`, `error`) synchronized with confirmed microphone capture, compact status popover (`Stop Voice`, `Hide Orb`, corner selector), and Settings UI preferences.
+- **Natural-Language Desktop File Creation & Folder Discovery:** Shared Windows Known Folder (`SHGetKnownFolderPath`) resolution (`desktop`, `downloads`, `documents`, `pictures`, `OneDrive`-redirected folders), safe default filenames (`New Text Document.txt`, `new_file.py`, `index.html`, etc.) with non-overwriting unique naming, and verified natural-language folder discovery (`"List files in my Major Project folder."`) with disambiguation and clarification prompts.
+
+### Changed
+- **Clean Application Launch Messages:** Removed internal PIDs from user-facing launch confirmations (`"<App> launched successfully."`) while preserving PID internally for process tracking and diagnostics.
+- **Agent Control Dashboard UI Polish:** Improved card alignment, hardware telemetry progress bars, Ollama runtime healthy/unreachable clarity, specialist hub responsive breakpoints, and bottom scroll padding across `1920×1080`, `1440×900`, `1280×820`, `1024×768`, and narrow desktop widths.
+
+---
+
 ## [0.5.4] - 2026-11-16
 
 ### Release Overview

@@ -120,6 +120,10 @@ class CreateFileInput(BaseModel):
         None,
         description="Optional UTF-8 text content to write to the created file.",
     )
+    auto_rename_on_conflict: bool = Field(
+        False,
+        description="When True, generate a unique filename instead of failing if the default file already exists.",
+    )
 
 
 class RenameItemInput(BaseModel):
@@ -247,17 +251,25 @@ def list_directory_tool(
 
     try:
         logger.info(f"list_directory_tool invoked for path: '{data.directory_path}'")
-        file_infos = mgr.list_directory(data.directory_path, show_hidden=data.show_hidden)
+        resolved_dir = mgr.resolve_directory(data.directory_path)
+        file_infos = mgr.list_directory(resolved_dir, show_hidden=data.show_hidden)
         items_dict = [fi.to_dict() for fi in file_infos]
+
+        if items_dict:
+            preview = ", ".join(item["name"] for item in items_dict[:15])
+            suffix = "..." if len(items_dict) > 15 else ""
+            msg = f"Found {len(items_dict)} items in '{resolved_dir}': {preview}{suffix}"
+        else:
+            msg = f"Directory '{resolved_dir}' is empty (0 items)."
 
         return FileActionResult(
             success=True,
             operation="list_directory",
-            source_path=data.directory_path,
+            source_path=str(resolved_dir),
             affected_items=len(items_dict),
             requires_confirmation=False,
             status="success",
-            message=f"Found {len(items_dict)} items in directory.",
+            message=msg,
             timestamp=now_ts,
             items=items_dict,
         )
@@ -454,15 +466,17 @@ def create_file_tool(
             data.file_path,
             confirm_overwrite=data.confirm_overwrite,
             content=data.content,
+            auto_rename_on_conflict=data.auto_rename_on_conflict,
         )
+        actual_path = res.get("path", data.file_path)
         return FileActionResult(
             success=True,
             operation="create_file",
-            destination_path=res.get("path", data.file_path),
+            destination_path=actual_path,
             affected_items=1,
             requires_confirmation=False,
             status="success",
-            message=f"File created successfully at '{data.file_path}'.",
+            message=f"File created successfully at '{actual_path}'.",
             timestamp=now_ts,
         )
     except ConfirmationRequiredError as err:

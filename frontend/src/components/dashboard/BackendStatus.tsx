@@ -54,14 +54,14 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
         </button>
       </div>
 
-      <div className="metrics-grid">
+      <div className="metrics-grid vp-backend-metrics-grid">
         {/* Endpoint Info */}
         <div className="metric-box">
           <div className="metric-box-header">
             <span>API Host</span>
             <Server size={14} />
           </div>
-          <div className="metric-box-value" style={{ fontSize: '15px' }}>
+          <div className="metric-box-value vp-metric-value-host">
             {baseUrl}
           </div>
           <div className="metric-box-footer">
@@ -75,7 +75,7 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
             <span>FastAPI Status</span>
             <Activity size={14} />
           </div>
-          <div className="metric-box-value" style={{ fontSize: '18px' }}>
+          <div className="metric-box-value">
             {connectionState === 'connected' ? (
               <span style={{ color: 'var(--status-success)' }}>Healthy</span>
             ) : connectionState === 'disconnected' ? (
@@ -99,11 +99,11 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
               <ShieldCheck size={14} style={{ color: 'var(--status-success)' }} />
             )}
           </div>
-          <div className="metric-box-value" style={{ fontSize: '18px' }}>
+          <div className="metric-box-value">
             {isEmergencyActive ? (
               <span style={{ color: 'var(--status-danger)' }}>EMERGENCY ACTIVE</span>
             ) : (
-              <span style={{ color: 'var(--status-success)' }}>Latched Normal</span>
+              <span style={{ color: 'var(--status-success)' }}>{emergencyStatus ? 'Normal' : 'Unknown'}</span>
             )}
           </div>
           <div className="metric-box-footer">
@@ -119,7 +119,7 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
             <span>Last Health Check</span>
             <Clock size={14} />
           </div>
-          <div className="metric-box-value" style={{ fontSize: '16px' }}>
+          <div className="metric-box-value">
             {formatLastChecked(lastChecked)}
           </div>
           <div className="metric-box-footer">

@@ -448,3 +448,20 @@ class TestFullAgentPipelineIntegration:
             if em_stop.is_emergency_stop_active():
                 em_stop.reset_emergency_stop()
 
+
+
+def test_list_named_folder_preserves_user_name(tmp_path, monkeypatch):
+    desktop = tmp_path / "Desktop"
+    major = desktop / "Major Project"
+    major.mkdir(parents=True)
+    monkeypatch.setattr(
+        "backend.automation.file_manager.get_default_approved_directories",
+        lambda: [desktop],
+    )
+    monkeypatch.setattr(
+        "backend.automation.file_manager._get_windows_known_folder_path",
+        lambda key: desktop if key == "desktop" else None,
+    )
+    plan = AgentPlanner()._deterministic_plan("List files in my Major Project folder", "file_management")
+    assert plan["steps"][0]["action"] == "list_directory"
+    assert plan["steps"][0]["parameters"] == {"directory_path": str(major.resolve())}

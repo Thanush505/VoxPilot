@@ -1,6 +1,6 @@
 # VoxPilot — Windows Installation & Data Lifecycle Guide
 
-VoxPilot (`v0.5.4`) is distributed for Windows 11 as a per-user Windows Installer (`VoxPilot-Setup.exe`) that runs cleanly without requiring Administrator elevation.
+VoxPilot (`v0.5.5`) is distributed for Windows 11 as a per-user Windows Installer (`VoxPilot-Setup.exe`) that runs cleanly without requiring Administrator elevation.
 
 ---
 
@@ -19,7 +19,7 @@ VoxPilot (`v0.5.4`) is distributed for Windows 11 as a per-user Windows Installe
   `%LOCALAPPDATA%\Programs\VoxPilot`
   Contains `VoxPilot.exe`, bundled Python/WebView2 runtime libraries (`_internal\`), `VERSION`, `README.txt`, `voxpilot.ico`, `install_browser.bat`, and `unins000.exe`.
 - **Canonical Windows AppUserModelID:**
-  `VoxPilotTeam.VoxPilot.DesktopAgent.0.5.4` (consistent across Start Menu shortcuts, taskbar grouping, and Windows toast notifications).
+  `VoxPilotTeam.VoxPilot.DesktopAgent.0.5.5` (consistent across Start Menu shortcuts, taskbar grouping, and Windows toast notifications).
 - **Start Menu Shortcuts:**
   - `VoxPilot` — Launches the console-free native Edge WebView2 desktop shell
   - `Install Playwright Browser` — Installs Playwright Chromium into `%LOCALAPPDATA%\ms-playwright`

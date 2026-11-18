@@ -731,7 +731,7 @@ class ApplicationLauncher:
                 "launch_method": entry.launch_method,
                 "source": entry.source,
                 "requires_confirmation": entry.requires_confirmation,
-                "message": f"Successfully launched {entry.display_name} (PID: {pid}).",
+                "message": f"{entry.display_name} launched successfully.",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         except (OSError, PermissionError) as err:
@@ -766,7 +766,7 @@ class ApplicationLauncher:
                 "launch_method": "executable",
                 "source": "static_registry",
                 "requires_confirmation": config.requires_confirmation,
-                "message": f"Successfully launched {config.display_name} (PID: {pid}).",
+                "message": f"{config.display_name} launched successfully.",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         except (OSError, PermissionError) as err:

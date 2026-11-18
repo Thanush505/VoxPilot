@@ -695,6 +695,42 @@ class ApiClient {
     );
   }
 
+  public async showFloatingOrb(): Promise<ApiResponse<VoiceStatusResponse>> {
+    return this.request<VoiceStatusResponse>(
+      '/agent/voice/orb/show',
+      { method: 'POST' },
+      8000
+    );
+  }
+
+  public async hideFloatingOrb(): Promise<ApiResponse<VoiceStatusResponse>> {
+    return this.request<VoiceStatusResponse>(
+      '/agent/voice/orb/hide',
+      { method: 'POST' },
+      8000
+    );
+  }
+
+  public async setFloatingOrbPanel(expanded: boolean): Promise<ApiResponse<{ expanded: boolean }>> {
+    return this.request<{ expanded: boolean }>(
+      '/agent/voice/orb/panel',
+      { method: 'POST', body: JSON.stringify({ expanded }) },
+      5000
+    );
+  }
+
+  public async updateFloatingOrbPosition(payload: {
+    corner?: string;
+    x?: number;
+    y?: number;
+  }): Promise<ApiResponse<VoiceStatusResponse>> {
+    return this.request<VoiceStatusResponse>(
+      '/agent/voice/orb/position',
+      { method: 'POST', body: JSON.stringify(payload) },
+      8000
+    );
+  }
+
   /**
    * Update and register a custom global Voice Mode keyboard shortcut: POST /agent/voice/shortcut
    */

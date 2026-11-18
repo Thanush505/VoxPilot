@@ -158,7 +158,10 @@ class IntentRecognizer:
         # "Find my resume", "Summarize this PDF", "What does this document say about...",
         # "Compare these two documents", "Find files modified recently in Downloads",
         # "Find all Python files inside my VoxPilot project", "Organize these files into folders"
-        if re.search(r"^(?:create|make)\s+(?:a\s+)?(?:new\s+)?(?:text\s+)?file\b", lower):
+        if re.search(
+            r"^(?:create|make)\s+(?:an?\s+)?(?:new\s+)?(?:empty\s+)?(?:(?:notepad|text|txt|python|py|html|htm|markdown|md|json|csv|yaml|yml|xml|javascript|js|typescript|ts|css|sql|log|batch|bat|powershell|ps1|note)\s+)?(?:file|document)\b",
+            lower,
+        ):
             return {
                 "intent": "file_management",
                 "confidence": 0.99,
@@ -201,7 +204,7 @@ class IntentRecognizer:
                 "reason": "User requested file or folder search on disk.",
             }
         if re.search(
-            r"^(?:list|show)\s+(?:my\s+)?(?:files|directory|folder|downloads|documents|desktop)\b",
+            r"^(?:list|show)\s+(?:all\s+|the\s+|my\s+)?(?:files|folders|items|contents|everything|directory|folder|downloads|documents|desktop|pictures)\b",
             lower,
         ) or re.search(
             r"^open\s+(?:my\s+(?:files|directory|folder|downloads|documents|desktop)|(?:the\s+)?(?:downloads|documents|desktop)\s+folder)\b",

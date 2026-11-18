@@ -49,9 +49,10 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
   onOpenAgentWorkspace,
 }) => {
   const [quickPrompt, setQuickPrompt] = useState('');
-  const { activeProviderLabel, activeModelLabel } = useAICore();
+  const { activeProvider, activeProviderLabel, activeModelLabel } = useAICore();
   const isEmergencyActive = emergencyStatus?.is_active ?? false;
   const isConnected = connectionState === 'connected';
+  const aiReady = isConnected && activeProvider?.health.available === true;
   const baseUrl = apiClient.getBaseUrl();
   const hostLabel = baseUrl.replace(/^https?:\/\//i, '');
 
@@ -68,7 +69,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
   };
 
   return (
-    <>
+    <div className="vp-dashboard">
       {/* Page Title & Context */}
       <div className="page-header">
         <div>
@@ -80,7 +81,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
         <div className="page-header-actions">
           <span className={`health-pill ${isConnected ? 'connected' : 'disconnected'}`}>
             <span className="status-dot" />
-            <span>{isConnected ? 'System Operational' : 'Backend Offline'}</span>
+            <span>{isConnected ? 'Backend Connected' : 'Backend Offline'}</span>
           </span>
         </div>
       </div>
@@ -124,7 +125,8 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
             <input
               type="text"
               className="vp-quick-command-input"
-              placeholder="Ask VoxPilot to run a task, summarize emails, research, or organize files..."
+              aria-label="Quick command"
+              placeholder="What would you like VoxPilot to do?"
               value={quickPrompt}
               onChange={(e) => setQuickPrompt(e.target.value)}
               disabled={!isConnected}
@@ -236,18 +238,18 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
           icon={<Bot size={18} />}
           label="AI Runtime & Agent"
           value={isConnected ? activeProviderLabel : 'Unavailable'}
-          badgeText={isConnected ? activeModelLabel : 'Offline'}
-          badgeVariant={isConnected ? 'success' : 'neutral'}
-          detail={isConnected ? 'LangGraph orchestrator & allowlisted tools ready' : 'Awaiting backend connection'}
+          badgeText={aiReady ? activeModelLabel : isConnected ? 'Unavailable' : 'Offline'}
+          badgeVariant={aiReady ? 'success' : 'warning'}
+          detail={aiReady ? 'AI provider ready for requests' : isConnected ? 'Check your AI provider in Settings' : 'Awaiting backend connection'}
         />
 
         {/* Card 3: Emergency Stop Latch */}
         <StatusCard
           icon={isEmergencyActive ? <ShieldAlert size={18} /> : <ShieldCheck size={18} />}
           label="Emergency Stop"
-          value={isEmergencyActive ? 'TRIGGERED' : 'Inactive (Safe)'}
-          badgeText={isEmergencyActive ? 'STOPPED' : 'Normal'}
-          badgeVariant={isEmergencyActive ? 'danger' : 'success'}
+          value={!emergencyStatus ? 'Unknown' : isEmergencyActive ? 'TRIGGERED' : 'Inactive (Safe)'}
+          badgeText={!emergencyStatus ? 'Checking' : isEmergencyActive ? 'STOPPED' : 'Normal'}
+          badgeVariant={!emergencyStatus ? 'neutral' : isEmergencyActive ? 'danger' : 'success'}
           detail={
             isEmergencyActive
               ? `Reason: ${emergencyStatus?.trigger_reason || 'Manual stop'}`
@@ -272,7 +274,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
 
       {/* Recent Activity Section (Empty or Real Data) */}
       <RecentActivity isBackendConnected={isConnected} />
-    </>
+    </div>
   );
 };
 

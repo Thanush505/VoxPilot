@@ -13,7 +13,7 @@ from typing import List, Optional, Tuple, Union
 
 from backend.paths import get_bundle_dir, get_executable_dir, get_project_root, is_frozen
 
-DEFAULT_APP_VERSION = "0.5.4"
+DEFAULT_APP_VERSION = "0.5.5"
 
 # Strict semantic version regex: optional leading 'v' or 'V', major.minor.patch,
 # optional pre-release (-alpha.1, -beta.2, -rc.1) and optional build metadata (+build.123)

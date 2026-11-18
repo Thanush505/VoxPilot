@@ -683,3 +683,67 @@ def test_live_launch_and_cleanup_notepad():
                 except Exception:
                     pass
 
+
+def test_discovered_app_launch_message_excludes_pid_but_keeps_internal_pid(tmp_path):
+    """User-facing launch messages must not expose PID while keeping pid internally."""
+    from backend.automation.application_discovery import DiscoveredApplication
+
+    fake_exe = tmp_path / "ChatGPT.exe"
+    fake_exe.write_text("", encoding="utf-8")
+
+    entry = DiscoveredApplication(
+        app_id="chatgpt",
+        name="ChatGPT",
+        display_name="ChatGPT",
+        launch_method="executable",
+        executable_path=str(fake_exe),
+        source="start_menu",
+        requires_confirmation=False,
+    )
+    launcher = ApplicationLauncher()
+    mock_proc = MagicMock()
+    mock_proc.pid = 33048
+
+    with (
+        patch.object(launcher, "_build_validated_command_for_entry", return_value=[str(fake_exe)]),
+        patch("backend.automation.application_launcher.subprocess.Popen", return_value=mock_proc),
+    ):
+        res = launcher.launch_discovered_application(entry)
+
+    assert res["success"] is True
+    assert res["pid"] == 33048
+    assert res["message"] == "ChatGPT launched successfully."
+    assert "pid" not in res["message"].lower()
+    assert "33048" not in res["message"]
+
+
+def test_static_app_launch_message_excludes_pid_but_keeps_internal_pid(tmp_path):
+    """Static config launch messages must not expose PID while keeping pid internally."""
+    from backend.automation.application_launcher import ApplicationConfig
+
+    fake_exe = tmp_path / "notepad.exe"
+    fake_exe.write_text("", encoding="utf-8")
+    cfg = ApplicationConfig(
+        app_id="notepad",
+        display_name="Notepad",
+        aliases=("notepad",),
+        executable_candidates=["notepad.exe"],
+        approved_directories=[str(tmp_path)],
+    )
+    launcher = ApplicationLauncher()
+    mock_proc = MagicMock()
+    mock_proc.pid = 41234
+
+    with (
+        patch.object(launcher, "find_executable", return_value=fake_exe),
+        patch("backend.automation.application_launcher.subprocess.Popen", return_value=mock_proc),
+    ):
+        res = launcher._launch_via_static_config(cfg)
+
+    assert res["success"] is True
+    assert res["pid"] == 41234
+    assert res["message"] == "Notepad launched successfully."
+    assert "pid" not in res["message"].lower()
+    assert "41234" not in res["message"]
+
+
